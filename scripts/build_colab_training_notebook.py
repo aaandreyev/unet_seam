@@ -318,7 +318,7 @@ def build_notebook() -> dict:
             "        except OSError:\n"
             "            pass\n"
             "print(\"LOGDIR =\", LOGDIR, \"| копия на Drive:\", DRIVE_TB)\n"
-            "output.serve_kernel_port_as_window(6006, path=\"/\", window_title=\"TensorBoard (unet_seam)\")\n"
+            "output.serve_kernel_port_as_window(6006, path=\"/\")\n"
             "print(\"Если встроенный просмотр серый — открой ссылку в новой вкладке.\")"
         ),
         code(
