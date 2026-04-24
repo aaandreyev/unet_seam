@@ -21,6 +21,18 @@ def _boundary_mae(pred: torch.Tensor, target: torch.Tensor, boundary_band: torch
     return float(((pred - target).abs() * boundary_band).mean().item())
 
 
+def _residual_abs_p99(residual: torch.Tensor, max_elements: int = 4_000_000) -> float:
+    """p99 of |residual|; subsample when flat size exceeds torch.quantile limits (large batch × image)."""
+    v = residual.abs().detach().float().reshape(-1)
+    n = v.numel()
+    if n == 0:
+        return 0.0
+    if n > max_elements:
+        idx = torch.randint(0, n, (max_elements,), device=v.device, dtype=torch.long)
+        v = v[idx]
+    return float(torch.quantile(v, 0.99).item())
+
+
 def evaluate_batch(pred: torch.Tensor, target: torch.Tensor, input_rgb: torch.Tensor, inner_mask: torch.Tensor, boundary_band: torch.Tensor, residual: torch.Tensor) -> dict[str, float]:
     pred_np = _to_numpy(pred)[0]
     target_np = _to_numpy(target)[0]
@@ -37,7 +49,7 @@ def evaluate_batch(pred: torch.Tensor, target: torch.Tensor, input_rgb: torch.Te
         "inner_mae": float(((pred - target).abs() * inner_mask).mean().item()),
         "outer_identity_error": float(((pred - input_rgb).abs() * (1.0 - inner_mask)).max().item()),
         "lowfreq_mae_sigma16": float(lowfreq_mae(pred, target, sigma=16.0).item()),
-        "residual_magnitude_p99": float(torch.quantile(residual.abs().reshape(-1), 0.99).item()),
+        "residual_magnitude_p99": _residual_abs_p99(residual),
         "baseline_boundary_ciede2000": baseline_boundary,
         "baseline_boundary_mae": _boundary_mae(input_rgb, target, boundary_band),
         "oracle_boundary_ciede2000": oracle_boundary,
