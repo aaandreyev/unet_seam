@@ -44,5 +44,7 @@ logging:
   tensorboard: true
   log_dir: outputs/logs/tensorboard
   log_interval: 20
+  # In Colab / subprocess, tqdm is hidden: print a JSON line every N train steps (set 0 to disable).
+  console_log_interval: 25
 viewer_cache:
   root: outputs/strip_cache/val

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -44,6 +46,7 @@ def run_epoch(
     tb_prefix: str = "train",
     tb_global_step: int = 0,
     tb_log_interval: int = 1,
+    console_log_interval: int = 0,
 ) -> tuple[EpochResult, int]:
     loss_computer = SeamLossComputer()
     train_mode = optimizer is not None
@@ -52,7 +55,15 @@ def run_epoch(
     agg_metrics: dict[str, float] = {}
     per_sample_metrics: list[dict[str, float]] = []
     steps = 0
-    progress = tqdm(loader, desc=desc or ("train" if train_mode else "eval"), dynamic_ncols=True, leave=False)
+    use_tqdm = sys.stderr.isatty()
+    n_batches = len(loader) if hasattr(loader, "__len__") else None
+    progress = tqdm(
+        loader,
+        desc=desc or ("train" if train_mode else "eval"),
+        dynamic_ncols=True,
+        leave=False,
+        disable=not use_tqdm,
+    )
     for batch in progress:
         batch = _move(batch, device)
         inputs = batch["input"]
@@ -107,6 +118,22 @@ def run_epoch(
             b_ciede=f"{agg_metrics.get('boundary_ciede2000', 0.0) / steps:.3f}",
             rel=f"{agg_metrics.get('relative_improvement', 0.0) / steps:.3f}",
         )
+        if console_log_interval > 0 and train_mode:
+            if steps == 1 or steps % console_log_interval == 0 or (n_batches is not None and steps == n_batches):
+                print(
+                    json.dumps(
+                        {
+                            "event": "train_step",
+                            "desc": desc,
+                            "step_in_epoch": steps,
+                            "batches_in_epoch": n_batches,
+                            "loss_total": round(agg_losses.get("total", 0.0) / steps, 6),
+                            "b_ciede": round(agg_metrics.get("boundary_ciede2000", 0.0) / steps, 4),
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
     progress.close()
     if steps == 0:
         return EpochResult({}, {}, []), tb_global_step

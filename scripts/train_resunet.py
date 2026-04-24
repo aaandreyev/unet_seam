@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -33,7 +34,10 @@ def main() -> None:
     seed_everything(cfg["seed"])
     device = pick_device()
     num_epochs = args.max_epochs or cfg["train"]["num_epochs"]
-    print(json.dumps({"device": str(device), "epochs": num_epochs, "batch_size": cfg["train"]["batch_size"]}, ensure_ascii=False))
+    print(
+        json.dumps({"device": str(device), "epochs": num_epochs, "batch_size": cfg["train"]["batch_size"]}, ensure_ascii=False),
+        flush=True,
+    )
     cache_root = Path(cfg["dataset"].get("cache_root", "outputs/strip_cache"))
     train_cache_manifest = Path(cfg["dataset"].get("train_cache_manifest", "manifests/strip_train_cache.jsonl"))
     val_cache_manifest = Path(cfg["dataset"].get("val_cache_manifest", "manifests/strip_val_cache.jsonl"))
@@ -78,7 +82,27 @@ def main() -> None:
             scaler.load_state_dict(state["scaler"])
         restore_rng_state(state["rng_state"])
         start_epoch = int(state["epoch"]) + 1
+        print(json.dumps({"event": "resumed", "start_epoch": start_epoch}, ensure_ascii=False), flush=True)
     log_cfg: dict = cfg.get("logging") or {}
+    console_iv = int(log_cfg.get("console_log_interval", 25))
+    print(
+        json.dumps(
+            {
+                "event": "train_start",
+                "train_samples": len(train_ds),
+                "val_samples": len(val_ds),
+                "batches_per_epoch": len(train_loader),
+                "val_batches_per_epoch": len(val_loader),
+                "num_epochs": num_epochs,
+                "start_epoch": start_epoch,
+                "end_epoch_excl": num_epochs,
+                "console_log_interval": console_iv,
+                "note": "In Colab subprocess tqdm is off; use these JSON lines + TensorBoard.",
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
     tb_on = bool(log_cfg.get("tensorboard", True))
     log_dir: Path = Path(log_cfg.get("log_dir", "outputs/logs/tensorboard"))
     log_interval = int(log_cfg.get("log_interval", 20))
@@ -89,13 +113,20 @@ def main() -> None:
 
             log_dir.mkdir(parents=True, exist_ok=True)
             tb_writer = SummaryWriter(str(log_dir))
-            print(json.dumps({"tensorboard_logdir": str(log_dir.resolve())}, ensure_ascii=False))
+            print(json.dumps({"tensorboard_logdir": str(log_dir.resolve())}, ensure_ascii=False), flush=True)
         except Exception as e:  # noqa: BLE001
-            print(json.dumps({"tensorboard": "disabled", "reason": str(e)}, ensure_ascii=False))
+            print(json.dumps({"tensorboard": "disabled", "reason": str(e)}, ensure_ascii=False), flush=True)
     global_step = 0
-    epoch_bar = tqdm(range(start_epoch, num_epochs), desc="epochs", dynamic_ncols=True)
+    epoch_use_tqdm = sys.stderr.isatty()
+    epoch_bar = tqdm(
+        range(start_epoch, num_epochs),
+        desc="epochs",
+        dynamic_ncols=True,
+        disable=not epoch_use_tqdm,
+    )
     for epoch in epoch_bar:
         epoch_start = time.time()
+        print(json.dumps({"event": "epoch_begin", "epoch": epoch + 1, "of": num_epochs}, ensure_ascii=False), flush=True)
         train_result, global_step = run_epoch(
             model,
             train_loader,
@@ -110,8 +141,17 @@ def main() -> None:
             tb_prefix="train",
             tb_global_step=global_step,
             tb_log_interval=max(1, log_interval),
+            console_log_interval=console_iv,
         )
-        val_result, _ = run_epoch(ema.model, val_loader, None, device, use_amp=False, desc=f"val e{epoch+1}/{num_epochs}")
+        val_result, _ = run_epoch(
+            ema.model,
+            val_loader,
+            None,
+            device,
+            use_amp=False,
+            desc=f"val e{epoch+1}/{num_epochs}",
+            console_log_interval=0,
+        )
         if tb_writer is not None:
             for k, v in val_result.losses.items():
                 tb_writer.add_scalar(f"val/loss_{k}", v, global_step)
@@ -137,6 +177,19 @@ def main() -> None:
             sec=f"{time.time()-epoch_start:.1f}",
             val_b=f"{val_result.metrics.get('boundary_ciede2000', 0.0):.3f}",
             rel=f"{val_result.metrics.get('relative_improvement', 0.0):.3f}",
+        )
+        print(
+            json.dumps(
+                {
+                    "event": "epoch_end",
+                    "epoch": epoch + 1,
+                    "sec": round(time.time() - epoch_start, 1),
+                    "train_loss": train_result.losses,
+                    "val_metrics": val_result.metrics,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
         )
     if tb_writer is not None:
         tb_writer.close()
