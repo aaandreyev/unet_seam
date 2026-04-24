@@ -135,9 +135,21 @@ def main() -> None:
         dynamic_ncols=True,
         disable=not epoch_use_tqdm,
     )
+    wall_t0 = time.perf_counter()
     for epoch in epoch_bar:
         epoch_start = time.time()
-        print(json.dumps({"event": "epoch_begin", "epoch": epoch + 1, "of": num_epochs}, ensure_ascii=False), flush=True)
+        print(
+            json.dumps(
+                {
+                    "event": "epoch_begin",
+                    "epoch": epoch + 1,
+                    "of": num_epochs,
+                    "sec_since_train_start": int(time.perf_counter() - wall_t0),
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
         train_result, global_step = run_epoch(
             model,
             train_loader,
@@ -154,6 +166,9 @@ def main() -> None:
             tb_log_interval=max(1, log_interval),
             console_log_interval=console_iv,
             loss_computer=loss_computer,
+            wall_t0=wall_t0,
+            current_epoch=epoch + 1,
+            total_epochs=num_epochs,
         )
         val_result, _ = run_epoch(
             ema.model,
@@ -164,6 +179,9 @@ def main() -> None:
             desc=f"val e{epoch+1}/{num_epochs}",
             console_log_interval=0,
             loss_computer=loss_computer,
+            wall_t0=wall_t0,
+            current_epoch=epoch + 1,
+            total_epochs=num_epochs,
         )
         if tb_writer is not None:
             for k, v in val_result.losses.items():
@@ -191,12 +209,19 @@ def main() -> None:
             val_b=f"{val_result.metrics.get('boundary_ciede2000', 0.0):.3f}",
             rel=f"{val_result.metrics.get('relative_improvement', 0.0):.3f}",
         )
+        rem_epochs = num_epochs - (epoch + 1)
+        # Rough ETA for the rest of training: (this epoch wall time) * epochs_left (ignores that epochs may get slower).
+        est_remaining_sec = int((time.time() - epoch_start) * rem_epochs) if rem_epochs > 0 else None
         print(
             json.dumps(
                 {
                     "event": "epoch_end",
                     "epoch": epoch + 1,
-                    "sec": round(time.time() - epoch_start, 1),
+                    "of": num_epochs,
+                    "epochs_left": rem_epochs,
+                    "sec_epoch_wall": round(time.time() - epoch_start, 1),
+                    "sec_since_train_start": int(time.perf_counter() - wall_t0),
+                    "eta_sec_full_run_rough": est_remaining_sec,
                     "train_loss": train_result.losses,
                     "val_metrics": val_result.metrics,
                 },

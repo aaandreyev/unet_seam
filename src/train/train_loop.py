@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,6 +49,9 @@ def run_epoch(
     tb_log_interval: int = 1,
     console_log_interval: int = 0,
     loss_computer: SeamLossComputer | None = None,
+    wall_t0: float | None = None,
+    current_epoch: int | None = None,
+    total_epochs: int | None = None,
 ) -> tuple[EpochResult, int]:
     if loss_computer is None:
         loss_computer = SeamLossComputer()
@@ -66,6 +70,7 @@ def run_epoch(
         leave=False,
         disable=not use_tqdm,
     )
+    t_epoch_start = time.monotonic()
     for batch in progress:
         batch = _move(batch, device)
         inputs = batch["input"]
@@ -127,20 +132,29 @@ def run_epoch(
         )
         if console_log_interval > 0 and train_mode:
             if steps == 1 or steps % console_log_interval == 0 or (n_batches is not None and steps == n_batches):
-                print(
-                    json.dumps(
-                        {
-                            "event": "train_step",
-                            "desc": desc,
-                            "step_in_epoch": steps,
-                            "batches_in_epoch": n_batches,
-                            "loss_total": round(agg_losses.get("total", 0.0) / steps, 6),
-                            "b_ciede": round(agg_metrics.get("boundary_ciede2000", 0.0) / steps, 4),
-                        },
-                        ensure_ascii=False,
-                    ),
-                    flush=True,
-                )
+                gs = tb_global_step + steps
+                elapsed_epoch = time.monotonic() - t_epoch_start
+                eta_epoch: float | None = None
+                if n_batches and steps > 0 and steps < n_batches:
+                    sec_per = elapsed_epoch / steps
+                    eta_epoch = sec_per * (n_batches - steps)
+                out: dict[str, Any] = {
+                    "event": "train_step",
+                    "desc": desc,
+                    "epoch": current_epoch,
+                    "of_epochs": total_epochs,
+                    "global_step": gs,
+                    "step_in_epoch": steps,
+                    "batches_in_epoch": n_batches,
+                    "progress_in_epoch": round(100.0 * steps / n_batches, 1) if n_batches and n_batches > 0 else None,
+                    "loss_total": round(agg_losses.get("total", 0.0) / steps, 6),
+                    "b_ciede": round(agg_metrics.get("boundary_ciede2000", 0.0) / steps, 4),
+                }
+                if wall_t0 is not None:
+                    out["sec_since_train_start"] = int(time.perf_counter() - wall_t0)
+                if eta_epoch is not None:
+                    out["eta_sec_this_epoch"] = int(eta_epoch)
+                print(json.dumps(out, ensure_ascii=False), flush=True)
     progress.close()
     if steps == 0:
         return EpochResult({}, {}, []), tb_global_step
