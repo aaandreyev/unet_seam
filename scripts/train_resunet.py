@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import sys
+
+# Before heavy imports: Colab is often quiet for 30–90s while torch loads.
+if __name__ == "__main__":
+    print("train_resunet: loading PyTorch and project code (this can take 30–90s)…", flush=True)
+
 import argparse
 import json
-import sys
 import time
 from pathlib import Path
 from typing import Any

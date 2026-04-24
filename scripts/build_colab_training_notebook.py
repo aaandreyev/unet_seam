@@ -264,7 +264,7 @@ def build_notebook() -> dict:
         ),
         code(
             "# 10. TRAIN\n"
-            "import os, sys, subprocess, json\n"
+            "import os, sys, subprocess\n"
             "env = os.environ.copy()\n"
             "env['PYTHONPATH'] = str(PROJECT_ROOT)\n"
             "env['PYTHONUNBUFFERED'] = '1'\n"
@@ -272,8 +272,17 @@ def build_notebook() -> dict:
             "if resume_path is not None:\n"
             "    cmd += ['--resume', str(resume_path)]\n"
             "print('TRAIN CMD:', ' '.join(map(str, cmd)))\n"
-            "print('Лог: JSON с event=train_start / train_step / epoch_end; кривые — в ячейке 10b (TensorBoard).')\n"
-            "subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=env, check=True)\n"
+            "print('Дальше: «loading PyTorch…», затем JSON (train_start / train_step / epoch_end). Потоковый вывод в ячейку.')\n"
+            "def _stream_cmd(cmd, cwd, env):\n"
+            "    p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=0)\n"
+            "    if p.stdout is not None:\n"
+            "        for line in p.stdout:\n"
+            "            print(line, end='')\n"
+            "            sys.stdout.flush()\n"
+            "    p.wait()\n"
+            "    if p.returncode != 0:\n"
+            "        raise subprocess.CalledProcessError(p.returncode, cmd)\n"
+            "_stream_cmd(cmd, str(PROJECT_ROOT), env)\n"
         ),
         code(
             "# 11. EVAL\n"
