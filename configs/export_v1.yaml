@@ -1,0 +1,4 @@
+checkpoint: outputs/checkpoints/best_boundary_ciede2000.pt
+export_root: outputs/exports
+model_name: seam_residual_corrector_v1
+strength_default: 1.0

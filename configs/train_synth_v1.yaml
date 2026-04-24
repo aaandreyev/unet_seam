@@ -1,0 +1,48 @@
+seed: 42
+dataset:
+  source_manifest: manifests/input_raw_manifest.jsonl
+  source_root: data/source_images
+  cache_root: outputs/strip_cache
+  train_cache_manifest: manifests/strip_train_cache.jsonl
+  val_cache_manifest: manifests/strip_val_cache.jsonl
+  strips_per_image: 25
+  strip_height: 1024
+  outer_width: 128
+  supported_inner_widths: [96, 128, 160, 192]
+  seam_jitter_px: 16
+  boundary_band_px: 24
+  weighted_scene_tags: [sky, skin, gradient, night, wall]
+model:
+  residual_mode: full
+  low_freq_sigma: 6.0
+train:
+  seed: 42
+  optimizer: AdamW
+  lr: 2.0e-4
+  weight_decay: 1.0e-4
+  betas: [0.9, 0.999]
+  grad_clip: 1.0
+  precision: bf16
+  batch_size: 16
+  num_epochs: 20
+  num_workers: 0
+scheduler:
+  type: cosine_with_warmup
+  warmup_steps: 1000
+  min_lr: 1.0e-6
+ema:
+  enabled: true
+  decay: 0.999
+plateau:
+  patience_epochs: 3
+  reduce_factor: 0.5
+  min_lr_stop: 1.0e-6
+early_stop:
+  patience_epochs: 5
+  metric: val_boundary_ciede2000
+logging:
+  tensorboard: true
+  log_dir: outputs/logs/tensorboard
+  log_interval: 20
+viewer_cache:
+  root: outputs/strip_cache/val

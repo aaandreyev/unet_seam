@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Strip Dataset Viewer</title>
+  <link rel="stylesheet" href="/static/viewer.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <h1>Strip Viewer</h1>
+    <div class="filters">
+      <input id="filter-split" placeholder="split">
+      <input id="filter-tag" placeholder="tag">
+      <input id="filter-orientation" placeholder="orientation">
+      <input id="filter-op" placeholder="op">
+      <button id="reload">Reload</button>
+    </div>
+    <div id="sample-list" class="sample-list"></div>
+  </aside>
+  <main class="main">
+    <nav class="tabs">
+      <button data-tab="inspector">Inspector</button>
+      <button data-tab="stats">Stats</button>
+      <button data-tab="runs">Runs</button>
+    </nav>
+    <section id="inspector" class="tab on">
+      <div class="images">
+        <img id="input-img" alt="input">
+        <img id="target-img" alt="target">
+      </div>
+      <pre id="meta"></pre>
+    </section>
+    <section id="stats" class="tab">
+      <pre id="stats-pre"></pre>
+    </section>
+    <section id="runs" class="tab">
+      <pre id="runs-pre"></pre>
+    </section>
+  </main>
+  <script src="/static/viewer.js"></script>
+</body>
+</html>

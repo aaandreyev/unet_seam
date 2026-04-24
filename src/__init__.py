@@ -1,0 +1,1 @@
+"""Seam residual corrector package."""

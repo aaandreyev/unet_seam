@@ -1,0 +1,327 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / "colab" / "seam_residual_corrector_train_eval_colab.ipynb"
+
+EMBED_FILES = [
+    "configs/model_resunet_v1.yaml",
+    "configs/train_synth_v1.yaml",
+    "configs/eval_v1.yaml",
+    "configs/export_v1.yaml",
+    "src/__init__.py",
+    "src/data/__init__.py",
+    "src/data/manifest.py",
+    "src/data/preprocess.py",
+    "src/data/strip_geometry.py",
+    "src/data/corruptions.py",
+    "src/data/synthetic_strip_dataset.py",
+    "src/data/cached_strip_dataset.py",
+    "src/models/__init__.py",
+    "src/models/blocks.py",
+    "src/models/resunet.py",
+    "src/losses/__init__.py",
+    "src/losses/lowfreq.py",
+    "src/losses/perceptual.py",
+    "src/losses/residual_guard.py",
+    "src/losses/seam_losses.py",
+    "src/metrics/__init__.py",
+    "src/metrics/bootstrap.py",
+    "src/metrics/deltae.py",
+    "src/metrics/lowfreq_metrics.py",
+    "src/metrics/reports.py",
+    "src/metrics/seam_metrics.py",
+    "src/train/__init__.py",
+    "src/train/checkpoint.py",
+    "src/train/ema.py",
+    "src/train/scheduler.py",
+    "src/train/train_loop.py",
+    "src/utils/__init__.py",
+    "src/utils/device.py",
+    "src/utils/image_io.py",
+    "src/utils/phash.py",
+    "src/utils/seed.py",
+    "scripts/train_resunet.py",
+    "scripts/run_eval.py",
+    "scripts/export_safetensors.py",
+    "scripts/verify_export.py",
+]
+
+
+def md(text: str) -> dict:
+    return {"cell_type": "markdown", "metadata": {}, "source": text}
+
+
+def code(text: str) -> dict:
+    return {"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [], "source": text}
+
+
+def file_map_literal() -> str:
+    file_map = {}
+    for rel in EMBED_FILES:
+        file_map[rel] = (ROOT / rel).read_text(encoding="utf-8")
+    return json.dumps(file_map, ensure_ascii=False, indent=2)
+
+
+def build_notebook() -> dict:
+    files_literal = file_map_literal()
+    cells = [
+        md(
+            "# Seam Residual Corrector v1 Colab Notebook\n\n"
+            "Готовый ноутбук для **training -> validation -> eval -> export -> verify_export**.\n\n"
+            "Локально нужно заранее собрать training bundle через `scripts/build_final_training_bundle.py`, "
+            "загрузить `.tar.gz` на Google Drive и указать путь в параметрах ниже."
+        ),
+        code(
+            "# 0. PARAMS\n"
+            "from pathlib import Path\n"
+            "import os\n\n"
+            "DATASET_BUNDLE_DRIVE_PATH = '/content/drive/MyDrive/unet_seam/seam_residual_corrector_training_bundle.tar.gz'\n"
+            "DRIVE_RUNS_DIR = '/content/drive/MyDrive/unet_seam_runs'\n"
+            "RUN_NAME = 'seam_residual_corrector_v1_run001'\n"
+            "USE_RAMDISK = True\n"
+            "RAMDISK_SIZE_GB = 48\n"
+            "COPY_ARCHIVE_TO_RAM_FIRST = True\n"
+            "SYNC_INTERVAL_SEC = 180\n"
+            "TRAIN_BATCH_SIZE = 32\n"
+            "TRAIN_EPOCHS = 20\n"
+            "TRAIN_NUM_WORKERS = 16\n"
+            "VAL_BATCH_SIZE = 8\n"
+            "PRIMARY_CHECKPOINT = 'best_boundary_ciede2000.pt'\n"
+            "PROJECT_ROOT = Path('/content/seam_runtime')\n"
+            "LOCAL_OUTPUTS = PROJECT_ROOT / 'outputs'\n"
+            "LOCAL_CHECKPOINTS = LOCAL_OUTPUTS / 'checkpoints'\n"
+            "LOCAL_EVAL = LOCAL_OUTPUTS / 'eval_reports'\n"
+            "LOCAL_EXPORTS = LOCAL_OUTPUTS / 'exports'\n"
+            "LOCAL_LOGS = LOCAL_OUTPUTS / 'logs'\n"
+            "LOCAL_DATA_ROOT = Path('/content/dataset_bundle')\n"
+            "DRIVE_RUN_DIR = Path(DRIVE_RUNS_DIR) / RUN_NAME\n"
+            "DRIVE_CKPT_DIR = DRIVE_RUN_DIR / 'checkpoints'\n"
+            "DRIVE_EVAL_DIR = DRIVE_RUN_DIR / 'eval_reports'\n"
+            "DRIVE_EXPORT_DIR = DRIVE_RUN_DIR / 'exports'\n"
+            "DRIVE_LOG_DIR = DRIVE_RUN_DIR / 'logs'\n"
+        ),
+        code(
+            "# 1. MOUNT DRIVE\n"
+            "from google.colab import drive\n"
+            "drive.mount('/content/drive')\n"
+            "print('Drive mounted')\n"
+        ),
+        code(
+            "# 2. INSTALL / RUNTIME CHECKS\n"
+            "import os, sys, subprocess, importlib.util, platform, json\n"
+            "pkgs = ['pyyaml','scipy','scikit-image','safetensors','tqdm','lpips','psutil']\n"
+            "subprocess.run(['apt-get', 'update', '-qq'], check=False)\n"
+            "subprocess.run(['apt-get', 'install', '-y', '-qq', 'pigz'], check=False)\n"
+            "subprocess.run([sys.executable, '-m', 'pip', 'install', '-q'] + pkgs, check=True)\n"
+            "import torch\n"
+            "device = 'cuda' if torch.cuda.is_available() else 'mps' if getattr(torch.backends, 'mps', None) and torch.backends.mps.is_available() else 'cpu'\n"
+            "print(json.dumps({'python': sys.executable, 'platform': platform.platform(), 'torch': torch.__version__, 'device': device}, ensure_ascii=False))\n"
+        ),
+        code(
+            "# 3. OPTIONAL RAMDISK\n"
+            "import os, psutil, subprocess, shutil\n"
+            "RAM_ROOT = Path('/content/ramdisk')\n"
+            "if USE_RAMDISK:\n"
+            "    mem = psutil.virtual_memory()\n"
+            "    eff = min(RAMDISK_SIZE_GB, max(8, int((mem.available / (1024**3)) * 0.5)))\n"
+            "    RAM_ROOT.mkdir(parents=True, exist_ok=True)\n"
+            "    mounted = subprocess.run(['mountpoint', str(RAM_ROOT)], capture_output=True).returncode == 0\n"
+            "    if not mounted:\n"
+            "        subprocess.run(['mount', '-t', 'tmpfs', '-o', f'size={eff}G,mode=777', 'tmpfs', str(RAM_ROOT)], check=True)\n"
+            "    DATA_ROOT = RAM_ROOT / 'dataset_bundle'\n"
+            "else:\n"
+            "    DATA_ROOT = LOCAL_DATA_ROOT\n"
+            "DATA_ROOT.mkdir(parents=True, exist_ok=True)\n"
+            "LOCAL_OUTPUTS.mkdir(parents=True, exist_ok=True)\n"
+            "for p in [LOCAL_CHECKPOINTS, LOCAL_EVAL, LOCAL_EXPORTS, LOCAL_LOGS]:\n"
+            "    p.mkdir(parents=True, exist_ok=True)\n"
+            "print('DATA_ROOT =', DATA_ROOT)\n"
+        ),
+        code(
+            "# 4. EXTRACT DATASET BUNDLE FROM DRIVE\n"
+            "import shutil, tarfile, time\n"
+            "from tqdm.auto import tqdm\n\n"
+            "src = Path(DATASET_BUNDLE_DRIVE_PATH)\n"
+            "if not src.exists():\n"
+            "    raise FileNotFoundError(src)\n"
+            "archive_local = src\n"
+            "if COPY_ARCHIVE_TO_RAM_FIRST and USE_RAMDISK:\n"
+            "    archive_local = RAM_ROOT / src.name\n"
+            "    with src.open('rb') as fin, archive_local.open('wb') as fout:\n"
+            "        total = src.stat().st_size\n"
+            "        with tqdm(total=total, unit='B', unit_scale=True, desc='copy_archive') as pbar:\n"
+            "            while True:\n"
+            "                chunk = fin.read(8 * 1024 * 1024)\n"
+            "                if not chunk:\n"
+            "                    break\n"
+            "                fout.write(chunk)\n"
+            "                pbar.update(len(chunk))\n"
+            "if DATA_ROOT.exists():\n"
+            "    shutil.rmtree(DATA_ROOT)\n"
+            "DATA_ROOT.mkdir(parents=True, exist_ok=True)\n"
+            "with tarfile.open(archive_local, 'r:*') as tf:\n"
+            "    members = tf.getmembers()\n"
+            "    for m in tqdm(members, desc='extract_bundle', dynamic_ncols=True):\n"
+            "        tf.extract(m, DATA_ROOT)\n"
+            "print('bundle extracted to', DATA_ROOT)\n"
+        ),
+        code(
+            "# 5. WRITE PROJECT FILES INTO RUNTIME\n"
+            "import json, os\n"
+            f"PROJECT_FILES = {files_literal}\n"
+            "for rel, text in PROJECT_FILES.items():\n"
+            "    path = PROJECT_ROOT / rel\n"
+            "    path.parent.mkdir(parents=True, exist_ok=True)\n"
+            "    path.write_text(text, encoding='utf-8')\n"
+            "sys.path.insert(0, str(PROJECT_ROOT))\n"
+            "print('project files written:', len(PROJECT_FILES))\n"
+        ),
+        code(
+            "# 6. VALIDATE BUNDLE LAYOUT\n"
+            "import json\n"
+            "required = [\n"
+            "    DATA_ROOT / 'manifests/strip_train_cache.jsonl',\n"
+            "    DATA_ROOT / 'manifests/strip_val_cache.jsonl',\n"
+            "    DATA_ROOT / 'outputs/strip_cache/train',\n"
+            "    DATA_ROOT / 'outputs/strip_cache/val',\n"
+            "]\n"
+            "for p in required:\n"
+            "    if not p.exists():\n"
+            "        raise FileNotFoundError(p)\n"
+            "print(json.dumps({\n"
+            "    'train_cache_dirs': len([p for p in (DATA_ROOT / 'outputs/strip_cache/train').iterdir() if p.is_dir()]),\n"
+            "    'val_cache_dirs': len([p for p in (DATA_ROOT / 'outputs/strip_cache/val').iterdir() if p.is_dir()]),\n"
+            "}, ensure_ascii=False))\n"
+        ),
+        code(
+            "# 7. BUILD RUNTIME CONFIGS\n"
+            "import yaml, json, os, shutil\n"
+            "cfg_dir = PROJECT_ROOT / 'runtime_configs'\n"
+            "cfg_dir.mkdir(parents=True, exist_ok=True)\n"
+            "train_cfg = yaml.safe_load((PROJECT_ROOT / 'configs/train_synth_v1.yaml').read_text(encoding='utf-8'))\n"
+            "eval_cfg = yaml.safe_load((PROJECT_ROOT / 'configs/eval_v1.yaml').read_text(encoding='utf-8'))\n"
+            "export_cfg = yaml.safe_load((PROJECT_ROOT / 'configs/export_v1.yaml').read_text(encoding='utf-8'))\n"
+            "train_cfg['dataset']['cache_root'] = str(DATA_ROOT / 'outputs/strip_cache')\n"
+            "train_cfg['dataset']['train_cache_manifest'] = str(DATA_ROOT / 'manifests/strip_train_cache.jsonl')\n"
+            "train_cfg['dataset']['val_cache_manifest'] = str(DATA_ROOT / 'manifests/strip_val_cache.jsonl')\n"
+            "train_cfg['train']['batch_size'] = TRAIN_BATCH_SIZE\n"
+            "train_cfg['train']['num_epochs'] = TRAIN_EPOCHS\n"
+            "train_cfg['train']['num_workers'] = TRAIN_NUM_WORKERS\n"
+            "eval_cfg['checkpoint'] = str(LOCAL_CHECKPOINTS / PRIMARY_CHECKPOINT)\n"
+            "eval_cfg['report_root'] = str(LOCAL_EVAL)\n"
+            "eval_cfg['cache_root'] = str(DATA_ROOT / 'outputs/strip_cache')\n"
+            "eval_cfg['val_cache_manifest'] = str(DATA_ROOT / 'manifests/strip_val_cache.jsonl')\n"
+            "export_cfg['checkpoint'] = str(LOCAL_CHECKPOINTS / PRIMARY_CHECKPOINT)\n"
+            "export_cfg['export_root'] = str(LOCAL_EXPORTS)\n"
+            "(cfg_dir / 'train.yaml').write_text(yaml.safe_dump(train_cfg, sort_keys=False), encoding='utf-8')\n"
+            "(cfg_dir / 'eval.yaml').write_text(yaml.safe_dump(eval_cfg, sort_keys=False), encoding='utf-8')\n"
+            "(cfg_dir / 'export.yaml').write_text(yaml.safe_dump(export_cfg, sort_keys=False), encoding='utf-8')\n"
+            "print('runtime configs written to', cfg_dir)\n"
+        ),
+        code(
+            "# 8. OPTIONAL RESUME FROM DRIVE LAST CHECKPOINT\n"
+            "import shutil\n"
+            "resume_path = None\n"
+            "DRIVE_CKPT_DIR.mkdir(parents=True, exist_ok=True)\n"
+            "drive_last = DRIVE_CKPT_DIR / 'last.pt'\n"
+            "if drive_last.exists():\n"
+            "    LOCAL_CHECKPOINTS.mkdir(parents=True, exist_ok=True)\n"
+            "    local_resume = LOCAL_CHECKPOINTS / 'resume_last.pt'\n"
+            "    shutil.copy2(drive_last, local_resume)\n"
+            "    resume_path = local_resume\n"
+            "print('resume_path =', resume_path)\n"
+        ),
+        code(
+            "# 9. BACKGROUND SYNC TO DRIVE\n"
+            "import threading, time, shutil\n"
+            "SYNC_STOP = threading.Event()\n"
+            "for p in [DRIVE_RUN_DIR, DRIVE_CKPT_DIR, DRIVE_EVAL_DIR, DRIVE_EXPORT_DIR, DRIVE_LOG_DIR]:\n"
+            "    p.mkdir(parents=True, exist_ok=True)\n"
+            "def sync_tree(src: Path, dst: Path):\n"
+            "    if not src.exists():\n"
+            "        return\n"
+            "    for path in src.rglob('*'):\n"
+            "        if not path.is_file():\n"
+            "            continue\n"
+            "        rel = path.relative_to(src)\n"
+            "        out = dst / rel\n"
+            "        out.parent.mkdir(parents=True, exist_ok=True)\n"
+            "        if not out.exists() or out.stat().st_mtime < path.stat().st_mtime or out.stat().st_size != path.stat().st_size:\n"
+            "            shutil.copy2(path, out)\n"
+            "def sync_loop():\n"
+            "    while not SYNC_STOP.wait(SYNC_INTERVAL_SEC):\n"
+            "        sync_tree(LOCAL_CHECKPOINTS, DRIVE_CKPT_DIR)\n"
+            "        sync_tree(LOCAL_EVAL, DRIVE_EVAL_DIR)\n"
+            "        sync_tree(LOCAL_EXPORTS, DRIVE_EXPORT_DIR)\n"
+            "        sync_tree(LOCAL_LOGS, DRIVE_LOG_DIR)\n"
+            "sync_thread = threading.Thread(target=sync_loop, daemon=True)\n"
+            "sync_thread.start()\n"
+            "print('background sync started')\n"
+        ),
+        code(
+            "# 10. TRAIN\n"
+            "import os, sys, subprocess, json\n"
+            "env = os.environ.copy()\n"
+            "env['PYTHONPATH'] = str(PROJECT_ROOT)\n"
+            "cmd = [sys.executable, '-m', 'scripts.train_resunet', '--config', str(PROJECT_ROOT / 'runtime_configs/train.yaml')]\n"
+            "if resume_path is not None:\n"
+            "    cmd += ['--resume', str(resume_path)]\n"
+            "print('TRAIN CMD:', ' '.join(map(str, cmd)))\n"
+            "subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=env, check=True)\n"
+        ),
+        code(
+            "# 11. EVAL\n"
+            "import os, sys, subprocess\n"
+            "env = os.environ.copy()\n"
+            "env['PYTHONPATH'] = str(PROJECT_ROOT)\n"
+            "cmd = [sys.executable, '-m', 'scripts.run_eval', '--config', str(PROJECT_ROOT / 'runtime_configs/eval.yaml')]\n"
+            "print('EVAL CMD:', ' '.join(map(str, cmd)))\n"
+            "subprocess.run(cmd, cwd=str(PROJECT_ROOT), env=env, check=True)\n"
+        ),
+        code(
+            "# 12. EXPORT + VERIFY\n"
+            "import os, sys, subprocess\n"
+            "env = os.environ.copy()\n"
+            "env['PYTHONPATH'] = str(PROJECT_ROOT)\n"
+            "export_cmd = [sys.executable, '-m', 'scripts.export_safetensors', '--config', str(PROJECT_ROOT / 'runtime_configs/export.yaml')]\n"
+            "verify_cmd = [sys.executable, '-m', 'scripts.verify_export', '--config', str(PROJECT_ROOT / 'runtime_configs/export.yaml')]\n"
+            "print('EXPORT CMD:', ' '.join(map(str, export_cmd)))\n"
+            "subprocess.run(export_cmd, cwd=str(PROJECT_ROOT), env=env, check=True)\n"
+            "print('VERIFY CMD:', ' '.join(map(str, verify_cmd)))\n"
+            "subprocess.run(verify_cmd, cwd=str(PROJECT_ROOT), env=env, check=True)\n"
+        ),
+        code(
+            "# 13. FINAL SYNC + SUMMARY\n"
+            "SYNC_STOP.set()\n"
+            "sync_tree(LOCAL_CHECKPOINTS, DRIVE_CKPT_DIR)\n"
+            "sync_tree(LOCAL_EVAL, DRIVE_EVAL_DIR)\n"
+            "sync_tree(LOCAL_EXPORTS, DRIVE_EXPORT_DIR)\n"
+            "sync_tree(LOCAL_LOGS, DRIVE_LOG_DIR)\n"
+            "print('Drive checkpoint files:', sorted(p.name for p in DRIVE_CKPT_DIR.glob('*')))\n"
+            "print('Drive export files:', sorted(p.name for p in DRIVE_EXPORT_DIR.glob('*')))\n"
+            "print('Drive eval runs:', sorted(p.name for p in DRIVE_EVAL_DIR.glob('*')))\n"
+        ),
+    ]
+    return {
+        "cells": cells,
+        "metadata": {
+            "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+            "language_info": {"name": "python", "version": "3.10"},
+        },
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    }
+
+
+def main() -> None:
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(json.dumps(build_notebook(), ensure_ascii=False, indent=2), encoding="utf-8")
+    print(OUT)
+
+
+if __name__ == "__main__":
+    main()
