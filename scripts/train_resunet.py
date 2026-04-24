@@ -119,6 +119,9 @@ def main() -> None:
 
             log_dir.mkdir(parents=True, exist_ok=True)
             tb_writer = SummaryWriter(str(log_dir))
+            # So TensorBoard has an event file before the first log_interval training steps (otherwise "No dashboards").
+            tb_writer.add_scalar("meta/run_started", 1.0, 0)
+            tb_writer.flush()
             print(json.dumps({"tensorboard_logdir": str(log_dir.resolve())}, ensure_ascii=False), flush=True)
         except Exception as e:  # noqa: BLE001
             print(json.dumps({"tensorboard": "disabled", "reason": str(e)}, ensure_ascii=False), flush=True)

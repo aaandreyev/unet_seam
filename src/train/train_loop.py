@@ -103,7 +103,11 @@ def run_epoch(
         steps += 1
         if tb_writer is not None and train_mode and tb_log_interval > 0:
             gs = tb_global_step + steps
-            if steps % tb_log_interval == 0 or steps == len(loader):
+            if (
+                steps == 1
+                or steps % tb_log_interval == 0
+                or (n_batches is not None and steps == n_batches)
+            ):
                 w = float(agg_losses.get("total", 0.0) / steps)
                 tb_writer.add_scalar(f"{tb_prefix}/loss/total", w, gs)
                 for lk, lv in agg_losses.items():
@@ -115,6 +119,7 @@ def run_epoch(
                 if scheduler is not None and optimizer is not None:
                     lr = optimizer.param_groups[0].get("lr", 0.0)
                     tb_writer.add_scalar(f"{tb_prefix}/lr", float(lr), gs)
+                tb_writer.flush()
         progress.set_postfix(
             loss=f"{agg_losses.get('total', 0.0) / steps:.4f}",
             b_ciede=f"{agg_metrics.get('boundary_ciede2000', 0.0) / steps:.3f}",
