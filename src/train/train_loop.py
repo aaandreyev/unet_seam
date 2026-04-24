@@ -47,8 +47,10 @@ def run_epoch(
     tb_global_step: int = 0,
     tb_log_interval: int = 1,
     console_log_interval: int = 0,
+    loss_computer: SeamLossComputer | None = None,
 ) -> tuple[EpochResult, int]:
-    loss_computer = SeamLossComputer()
+    if loss_computer is None:
+        loss_computer = SeamLossComputer()
     train_mode = optimizer is not None
     model.train(train_mode)
     agg_losses: dict[str, float] = {}

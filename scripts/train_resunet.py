@@ -20,6 +20,7 @@ from tqdm.auto import tqdm
 
 from src.data.cached_strip_dataset import CachedStripDataset
 from src.data.synthetic_strip_dataset import SyntheticStripDataset, collate_strip_batch
+from src.losses.seam_losses import SeamLossComputer
 from src.models.resunet import SeamResUNet
 from src.train.checkpoint import load_checkpoint, restore_rng_state, save_training_checkpoint
 from src.train.ema import EMA
@@ -122,6 +123,8 @@ def main() -> None:
         except Exception as e:  # noqa: BLE001
             print(json.dumps({"tensorboard": "disabled", "reason": str(e)}, ensure_ascii=False), flush=True)
     global_step = 0
+    # One LPIPS / SeamLossComputer for all epochs (avoids re-loading alex.net weights every epoch).
+    loss_computer = SeamLossComputer()
     epoch_use_tqdm = sys.stderr.isatty()
     epoch_bar = tqdm(
         range(start_epoch, num_epochs),
@@ -147,6 +150,7 @@ def main() -> None:
             tb_global_step=global_step,
             tb_log_interval=max(1, log_interval),
             console_log_interval=console_iv,
+            loss_computer=loss_computer,
         )
         val_result, _ = run_epoch(
             ema.model,
@@ -156,6 +160,7 @@ def main() -> None:
             use_amp=False,
             desc=f"val e{epoch+1}/{num_epochs}",
             console_log_interval=0,
+            loss_computer=loss_computer,
         )
         if tb_writer is not None:
             for k, v in val_result.losses.items():
