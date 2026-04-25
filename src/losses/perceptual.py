@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import torch
 
 from src.models.blocks import gaussian_blur_tensor
@@ -16,7 +18,10 @@ class BoundaryLPIPSLoss:
             self.model = None
         else:
             try:
-                self.model = lpips.LPIPS(net="alex", pnet_rand=True)
+                # LPIPS still triggers torchvision UserWarnings (pretrained) on AlexNet; narrow scope.
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    self.model = lpips.LPIPS(net="alex", pnet_rand=True)
             except Exception:
                 self.model = None
 

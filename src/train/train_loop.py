@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import time
@@ -7,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -80,6 +81,7 @@ def run_epoch(
         if wall_t0 is not None:
             vpre["sec_since_train_start"] = int(time.perf_counter() - wall_t0)
         print(json.dumps(vpre, ensure_ascii=False), flush=True)
+    _amp_device_types = frozenset({"cuda", "cpu", "mps", "hpu", "xpu", "mtia"})
     for batch in progress:
         batch = _move(batch, device)
         inputs = batch["input"]
@@ -87,24 +89,35 @@ def run_epoch(
         target = batch["target"]
         inner_mask = batch["inner_region_mask"]
         boundary = batch["boundary_band_mask"]
-        with autocast(enabled=use_amp):
+        ad = inputs.device.type
+        if ad in _amp_device_types:
+            amp_ctx = autocast(device_type=ad, enabled=use_amp)
+        else:
+            amp_ctx = contextlib.nullcontext()
+        with amp_ctx:
             residual = model(inputs)
             pred = (input_rgb + residual).clamp(0.0, 1.0)
             pred[:, :, :, :128] = input_rgb[:, :, :, :128]
             losses = loss_computer(pred, target, input_rgb, inner_mask, boundary, residual)
         if train_mode:
+            assert optimizer is not None
             optimizer.zero_grad(set_to_none=True)
+            did_optim_step = False
             if scaler is not None and use_amp:
                 scaler.scale(losses["total"]).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                _prev = optimizer._step_count
                 scaler.step(optimizer)
                 scaler.update()
+                did_optim_step = optimizer._step_count > _prev
             else:
                 losses["total"].backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                _prev = optimizer._step_count
                 optimizer.step()
-            if scheduler is not None:
+                did_optim_step = optimizer._step_count > _prev
+            if scheduler is not None and did_optim_step:
                 scheduler.step()
             if ema is not None:
                 ema.update(model)

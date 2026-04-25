@@ -8,13 +8,14 @@ if __name__ == "__main__":
 
 import argparse
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
 
 import torch
 import yaml
-from torch.cuda.amp import GradScaler
+from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
@@ -31,6 +32,9 @@ from src.utils.seed import seed_everything, worker_init_fn
 
 
 def main() -> None:
+    # Before TensorFlow (pulled in by torch.utils.tensorboard) loads — fewer cuDNN/oneDNN stderr lines.
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+    os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/train_synth_v1.yaml")
     parser.add_argument("--resume", default=None)
@@ -67,7 +71,10 @@ def main() -> None:
     model = SeamResUNet(residual_mode=cfg["model"]["residual_mode"], low_freq_sigma=cfg["model"]["low_freq_sigma"]).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["train"]["lr"], weight_decay=cfg["train"]["weight_decay"], betas=tuple(cfg["train"]["betas"]))
     ema = EMA(model, decay=cfg["ema"]["decay"])
-    scaler = GradScaler(enabled=amp_enabled(device, cfg["train"]["precision"]))
+    _amp = amp_enabled(device, cfg["train"]["precision"])
+    scaler = (
+        GradScaler("cuda", enabled=_amp) if device.type == "cuda" else GradScaler("cpu", enabled=False)
+    )
     total_steps = max(len(train_loader) * num_epochs, 1)
     scheduler = cosine_with_warmup(optimizer, warmup_steps=cfg["scheduler"]["warmup_steps"], total_steps=total_steps)
     start_epoch = 0
