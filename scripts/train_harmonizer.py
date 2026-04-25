@@ -214,7 +214,7 @@ def main() -> None:
     ema = EMA(model, decay=float(cfg.get("ema", {}).get("decay", 0.999)))
     if device.type == "cuda" and hasattr(torch, "compile") and train_cfg.get("compile", True):
         try:
-            model = torch.compile(model, mode="reduce-overhead")
+            model = torch.compile(model, mode="default")
             print(json.dumps({"event": "torch_compile", "status": "ok"}, ensure_ascii=False), flush=True)
         except Exception as exc:
             print(json.dumps({"event": "torch_compile", "status": "skipped", "reason": str(exc)}, ensure_ascii=False), flush=True)
