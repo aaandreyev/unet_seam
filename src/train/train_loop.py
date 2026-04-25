@@ -71,6 +71,15 @@ def run_epoch(
         disable=not use_tqdm,
     )
     t_epoch_start = time.monotonic()
+    if not train_mode and console_log_interval > 0 and n_batches is not None:
+        vpre: dict[str, Any] = {
+            "event": "val_iter_begin",
+            "desc": desc,
+            "batches_in_epoch": n_batches,
+        }
+        if wall_t0 is not None:
+            vpre["sec_since_train_start"] = int(time.perf_counter() - wall_t0)
+        print(json.dumps(vpre, ensure_ascii=False), flush=True)
     for batch in progress:
         batch = _move(batch, device)
         inputs = batch["input"]

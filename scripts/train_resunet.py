@@ -170,6 +170,20 @@ def main() -> None:
             current_epoch=epoch + 1,
             total_epochs=num_epochs,
         )
+        # Flush before val: no train_step/val_step lines until a batch finishes; Colab may look "stuck".
+        print(
+            json.dumps(
+                {
+                    "event": "val_begin",
+                    "epoch": epoch + 1,
+                    "of": num_epochs,
+                    "val_batches": len(val_loader),
+                    "sec_since_train_start": int(time.perf_counter() - wall_t0),
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
         val_result, _ = run_epoch(
             ema.model,
             val_loader,
