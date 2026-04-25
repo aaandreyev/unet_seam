@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -23,6 +24,43 @@ class HarmonizerEpochResult:
     losses: dict[str, float]
     metrics: dict[str, float]
     per_sample_metrics: list[dict[str, float]]
+
+
+def _is_compiled(model: torch.nn.Module) -> bool:
+    return hasattr(torch, "_dynamo") and isinstance(
+        model, torch._dynamo.eval_frame.OptimizedModule
+    )
+
+
+class _CompileWarmupTicker:
+    """Prints a heartbeat every `interval` seconds while torch.compile JIT-compiles
+    the first batch. Stopped via context manager."""
+
+    def __init__(self, interval: float = 15.0) -> None:
+        self._interval = interval
+        self._stop = threading.Event()
+        self._t0 = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        while not self._stop.wait(timeout=self._interval):
+            elapsed = int(time.monotonic() - self._t0)
+            print(
+                json.dumps({"event": "torch_compile_warmup_tick", "sec": elapsed}, ensure_ascii=False),
+                flush=True,
+            )
+
+    def __enter__(self) -> "_CompileWarmupTicker":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self._t0
 
 
 def _move(batch: dict, device: torch.device) -> dict:
@@ -62,6 +100,7 @@ def run_harmonizer_epoch(
         print(json.dumps({"event": "harmonizer_iter_begin", "desc": desc, "batches": n_batches}, ensure_ascii=False), flush=True)
     amp_dtype = torch.bfloat16 if device.type == "cuda" and torch.cuda.is_bf16_supported() else torch.float16
     amp_ctx_factory = autocast if device.type in {"cuda", "cpu", "mps"} else None
+    _compile_warmup_done = not (train_mode and _is_compiled(model))
     for batch in progress:
         batch = _move(batch, device)
         if train_mode and gpu_corruption is not None:
@@ -90,6 +129,13 @@ def run_harmonizer_epoch(
                 for k, v in batch.items()
             }
         ctx = torch.inference_mode() if not train_mode else contextlib.nullcontext()
+        if not _compile_warmup_done:
+            print(
+                json.dumps({"event": "torch_compile_warmup_begin", "note": "first forward triggers Triton JIT"}, ensure_ascii=False),
+                flush=True,
+            )
+            _ticker = _CompileWarmupTicker(interval=15.0)
+            _ticker.__enter__()
         with ctx:
             if amp_ctx_factory is not None:
                 amp_ctx = amp_ctx_factory(device_type=device.type, dtype=amp_dtype, enabled=use_amp)
@@ -98,6 +144,13 @@ def run_harmonizer_epoch(
             with amp_ctx:
                 outputs = model(batch["input"])
                 losses = loss_computer(outputs, batch)
+        if not _compile_warmup_done:
+            _ticker.__exit__(None, None, None)
+            print(
+                json.dumps({"event": "torch_compile_warmup_done", "sec": round(_ticker.elapsed, 1)}, ensure_ascii=False),
+                flush=True,
+            )
+            _compile_warmup_done = True
         if train_mode:
             assert optimizer is not None
             optimizer.zero_grad(set_to_none=True)
