@@ -42,6 +42,6 @@ ema:
   decay: 0.999
 logging:
   tensorboard: true
-  log_dir: outputs/logs/tensorboard_harmonizer
+  log_dir: outputs/logs/tensorboard
   log_interval: 20
   console_log_interval: 25
