@@ -142,7 +142,11 @@ def main() -> None:
         weight_decay=float(train_cfg["weight_decay"]),
         betas=tuple(train_cfg.get("betas", [0.9, 0.99])),
     )
-    scaler = GradScaler("cuda", enabled=amp_enabled(device, train_cfg.get("precision", "bf16"))) if device.type == "cuda" else GradScaler("cpu", enabled=False)
+    precision = train_cfg.get("precision", "bf16")
+    use_amp = amp_enabled(device, precision)
+    # GradScaler only needed for fp16; bf16 has fp32-range exponent and doesn't need loss scaling
+    scaler_enabled = use_amp and precision == "fp16"
+    scaler = GradScaler("cuda", enabled=scaler_enabled) if device.type == "cuda" else GradScaler("cpu", enabled=False)
     total_epochs = int(args.max_epochs if args.max_epochs is not None else train_cfg["num_epochs"])
     scheduler = cosine_with_warmup(
         optimizer,
@@ -204,7 +208,7 @@ def main() -> None:
             ema=ema,
             scaler=scaler,
             scheduler=scheduler,
-            use_amp=scaler.is_enabled(),
+            use_amp=use_amp,
             desc=f"train e{epoch+1}/{total_epochs}",
             tb_writer=tb_writer,
             tb_global_step=global_step,

@@ -56,13 +56,14 @@ def run_harmonizer_epoch(
     t0 = time.monotonic()
     if console_log_interval > 0:
         print(json.dumps({"event": "harmonizer_iter_begin", "desc": desc, "batches": n_batches}, ensure_ascii=False), flush=True)
+    amp_dtype = torch.bfloat16 if device.type == "cuda" and torch.cuda.is_bf16_supported() else torch.float16
     amp_ctx_factory = autocast if device.type in {"cuda", "cpu", "mps"} else None
     for batch in progress:
         batch = _move(batch, device)
         ctx = torch.inference_mode() if not train_mode else contextlib.nullcontext()
         with ctx:
             if amp_ctx_factory is not None:
-                amp_ctx = amp_ctx_factory(device_type=device.type, enabled=use_amp)
+                amp_ctx = amp_ctx_factory(device_type=device.type, dtype=amp_dtype, enabled=use_amp)
             else:
                 amp_ctx = contextlib.nullcontext()
             with amp_ctx:
