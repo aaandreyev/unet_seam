@@ -25,6 +25,28 @@ from src.utils.device import amp_enabled, pick_device
 from src.utils.seed import seed_everything, worker_init_fn
 
 
+# NAFBlockLite: pw1 maps -> (channels * expansion * 2) = 4 * channels[0] when expansion=2.
+# PyTorch CUDA conv requires canUse32BitIndexMath: numel < 2^31 (fails at B=64, 128ch, 1024×256).
+_NAF_INTERMEDIATE_FACTOR = 4
+_INT32_MAX_ELEMS = 2_147_483_647
+
+
+def _assert_batch_within_cuda_index_limit(
+    ch0: int, strip_h: int, strip_w: int, train_bs: int, val_bs: int,
+) -> None:
+    inter_c = ch0 * _NAF_INTERMEDIATE_FACTOR
+    nmax = _INT32_MAX_ELEMS
+    cap = max(1, nmax // (inter_c * strip_h * strip_w))
+    for name, bs in (("train", train_bs), ("val", val_bs)):
+        n = bs * inter_c * strip_h * strip_w
+        if n > nmax:
+            raise ValueError(
+                f"{name} batch_size={bs} is too large for {strip_h}×{strip_w} and channels[0]={ch0}: "
+                f"first NAF block activations use {n} elements (PyTorch/CUDA index limit 2^31-1). "
+                f"Use {name} batch_size <= {cap}."
+            )
+
+
 def _quality(metrics: dict[str, float]) -> float:
     de = metrics.get("boundary_ciede2000_16", float("inf"))
     base = metrics.get("baseline_boundary_ciede2000_16", de)
@@ -140,6 +162,13 @@ def main() -> None:
     ).to(device)
     if device.type == "cuda":
         model = model.to(memory_format=torch.channels_last)
+    dset = cfg["dataset"]
+    strip_h = int(dset.get("strip_height", 1024))
+    strip_w = int(dset.get("outer_width", 128)) + int(dset.get("inner_width", 128))
+    train_bs = int(train_cfg["batch_size"])
+    val_bs = int(train_cfg.get("val_batch_size", train_cfg["batch_size"]))
+    if device.type == "cuda":
+        _assert_batch_within_cuda_index_limit(model.channels[0], strip_h, strip_w, train_bs, val_bs)
     gpu_corruption = GPUCorruption().to(device) if device.type == "cuda" else None
     optimizer = torch.optim.AdamW(
         model.parameters(),
