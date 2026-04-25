@@ -41,10 +41,14 @@ def _build_dataset(cfg: dict[str, Any], split: str) -> SyntheticStripDataset:
         inner_width=int(dcfg.get("inner_width", 128)),
         seam_jitter_px=int(dcfg.get("seam_jitter_px", 0)),
     )
+    if split == "train":
+        strips = int(dcfg.get("strips_per_image", 25))
+    else:
+        strips = int(dcfg.get("val_strips_per_image", 1))
     return SyntheticStripDataset(
         Path(dcfg["source_manifest"]),
         split=split,
-        strips_per_image=int(dcfg.get("strips_per_image", 25 if split == "train" else 1)),
+        strips_per_image=strips,
         seed=int(cfg.get("seed", 42)),
         spec=spec,
         boundary_band_px=int(dcfg.get("boundary_band_px", 24)),
@@ -105,7 +109,7 @@ def main() -> None:
     common = {"collate_fn": collate_strip_batch, "pin_memory": device.type == "cuda"}
     if num_workers > 0:
         common["persistent_workers"] = True
-        common["prefetch_factor"] = 4
+        common["prefetch_factor"] = 2
     train_loader = DataLoader(
         train_ds,
         batch_size=int(train_cfg["batch_size"]),
