@@ -11,6 +11,7 @@ import yaml
 from torch.amp import GradScaler
 from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
 
+from src.data.gpu_corruptions import GPUCorruption
 from src.data.real_strip_dataset import RealPairedStripDataset
 from src.data.strip_geometry import StripSpec
 from src.data.synthetic_strip_dataset import SyntheticStripDataset, collate_strip_batch
@@ -33,7 +34,7 @@ def _quality(metrics: dict[str, float]) -> float:
     return de + 200.0 * mae + 50.0 * low + no_improve
 
 
-def _build_dataset(cfg: dict[str, Any], split: str) -> SyntheticStripDataset:
+def _build_dataset(cfg: dict[str, Any], split: str, apply_corruption: bool = True) -> SyntheticStripDataset:
     dcfg = cfg["dataset"]
     spec = StripSpec(
         strip_height=int(dcfg.get("strip_height", 1024)),
@@ -53,6 +54,7 @@ def _build_dataset(cfg: dict[str, Any], split: str) -> SyntheticStripDataset:
         spec=spec,
         boundary_band_px=int(dcfg.get("boundary_band_px", 24)),
         inner_widths=[int(dcfg.get("inner_width", 128))],
+        apply_corruption=apply_corruption,
     )
 
 
@@ -91,7 +93,7 @@ def main() -> None:
     if device.type == "cuda":
         torch.backends.cudnn.benchmark = True
         torch.set_float32_matmul_precision("high")
-    synthetic_train_ds = _build_dataset(cfg, "train")
+    synthetic_train_ds = _build_dataset(cfg, "train", apply_corruption=False)
     real_train_ds = _build_real_dataset(cfg, "train")
     train_ds = synthetic_train_ds
     sampler = None
@@ -136,6 +138,9 @@ def main() -> None:
         alpha=float(model_cfg.get("alpha", 0.20)),
         outer_width=int(cfg["dataset"].get("outer_width", 128)),
     ).to(device)
+    if device.type == "cuda":
+        model = model.to(memory_format=torch.channels_last)
+    gpu_corruption = GPUCorruption().to(device) if device.type == "cuda" else None
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(train_cfg["lr"]),
@@ -199,6 +204,7 @@ def main() -> None:
         tb_writer = SummaryWriter(str(Path(log_cfg.get("log_dir", "outputs/logs/tensorboard_harmonizer"))))
     global_step = start_epoch * len(train_loader)
     for epoch in range(start_epoch, total_epochs):
+        outer_width = int(cfg["dataset"].get("outer_width", 128))
         train_result, global_step = run_harmonizer_epoch(
             model,
             train_loader,
@@ -214,6 +220,8 @@ def main() -> None:
             tb_global_step=global_step,
             tb_log_interval=int(log_cfg.get("log_interval", 20)),
             console_log_interval=int(log_cfg.get("console_log_interval", 25)),
+            gpu_corruption=gpu_corruption,
+            outer_width=outer_width,
         )
         val_result, _ = run_harmonizer_epoch(
             ema.model,

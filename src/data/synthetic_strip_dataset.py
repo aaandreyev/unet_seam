@@ -43,6 +43,7 @@ class SyntheticStripDataset(Dataset):
         spec: StripSpec | None = None,
         boundary_band_px: int = 24,
         inner_widths: list[int] | None = None,
+        apply_corruption: bool = True,
     ) -> None:
         self.manifest_root = manifest_path.parent.parent
         self.rows = [row for row in read_jsonl(manifest_path) if not split or row.get("split") == split]
@@ -51,6 +52,7 @@ class SyntheticStripDataset(Dataset):
         self.spec = spec or StripSpec()
         self.boundary_band_px = boundary_band_px
         self.inner_widths = inner_widths or [96, 128, 160, 192]
+        self.apply_corruption = apply_corruption
         self.base_variants = self._build_base_variants()
 
     def _build_base_variants(self) -> list[SampleConfig]:
@@ -145,9 +147,10 @@ class SyntheticStripDataset(Dataset):
         clean_strip = clean_strip[..., : self.spec.strip_height, : self.spec.outer_width + cfg.inner_width]
         target = clean_strip.clone()
         input_rgb = clean_strip.unsqueeze(0)
-        inner = input_rgb[..., self.spec.outer_width :]
-        corrupted = apply_random_corruptions(inner, torch.Generator().manual_seed(self.seed + idx))
-        input_rgb[..., self.spec.outer_width :] = corrupted.image
+        if self.apply_corruption:
+            inner = input_rgb[..., self.spec.outer_width :]
+            corrupted = apply_random_corruptions(inner, torch.Generator().manual_seed(self.seed + idx))
+            input_rgb[..., self.spec.outer_width :] = corrupted.image
         mask = make_inner_mask(self.spec.strip_height, self.spec.outer_width + cfg.inner_width, seam_x)
         distance = make_distance_to_seam(self.spec.strip_height, self.spec.outer_width + cfg.inner_width, seam_x)
         boundary = make_boundary_band_mask(self.spec.strip_height, self.spec.outer_width + cfg.inner_width, seam_x, self.boundary_band_px)
@@ -170,7 +173,7 @@ class SyntheticStripDataset(Dataset):
                 "seam_jitter_px": cfg.seam_jitter_px,
                 "inner_width": cfg.inner_width,
                 "edge_padded_pixels": 0,
-                "ops": corrupted.ops,
+                "ops": corrupted.ops if self.apply_corruption else [],
                 "scene_tags": row.get("scene_tags", []),
                 "split": row.get("split"),
                 "cluster_id": row.get("cluster_id"),

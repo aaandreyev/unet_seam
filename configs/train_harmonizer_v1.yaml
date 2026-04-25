@@ -34,7 +34,7 @@ train:
   batch_size: 64
   val_batch_size: 128
   num_epochs: 20
-  num_workers: 8
+  num_workers: 4
 scheduler:
   warmup_steps: 200
   min_lr_scale: 0.005

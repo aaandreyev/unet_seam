@@ -25,7 +25,7 @@ class HarmonizerEpochResult:
 
 
 def _move(batch: dict, device: torch.device) -> dict:
-    return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+    return {k: v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
 
 def run_harmonizer_epoch(
@@ -44,6 +44,8 @@ def run_harmonizer_epoch(
     tb_global_step: int = 0,
     tb_log_interval: int = 20,
     console_log_interval: int = 25,
+    gpu_corruption: torch.nn.Module | None = None,
+    outer_width: int = 128,
 ) -> tuple[HarmonizerEpochResult, int]:
     train_mode = optimizer is not None
     model.train(train_mode)
@@ -60,6 +62,12 @@ def run_harmonizer_epoch(
     amp_ctx_factory = autocast if device.type in {"cuda", "cpu", "mps"} else None
     for batch in progress:
         batch = _move(batch, device)
+        if train_mode and gpu_corruption is not None:
+            clean_strip = batch["input"][:, :3]
+            inner = clean_strip[:, :, :, outer_width:]
+            corrupted_inner = gpu_corruption(inner)
+            corrupted_strip = torch.cat([clean_strip[:, :, :, :outer_width], corrupted_inner], dim=-1)
+            batch = {**batch, "input": torch.cat([corrupted_strip, batch["input"][:, 3:]], dim=1)}
         ctx = torch.inference_mode() if not train_mode else contextlib.nullcontext()
         with ctx:
             if amp_ctx_factory is not None:
