@@ -1,11 +1,11 @@
 seed: 42
 dataset:
   source_manifest: manifests/input_raw_manifest.jsonl
-  strips_per_image: 25
+  strips_per_image: 50
   strip_height: 1024
   outer_width: 128
   inner_width: 128
-  seam_jitter_px: 0
+  seam_jitter_px: 6
   boundary_band_px: 24
 model:
   architecture: seam_harmonizer_v1
@@ -31,12 +31,12 @@ train:
   weight_decay: 1.0e-4
   betas: [0.9, 0.99]
   precision: bf16
-  batch_size: 64
-  val_batch_size: 64
+  batch_size: 128
+  val_batch_size: 256
   num_epochs: 20
-  num_workers: 4
+  num_workers: 8
 scheduler:
-  warmup_steps: 1000
+  warmup_steps: 200
   min_lr_scale: 0.005
 ema:
   decay: 0.999

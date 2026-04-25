@@ -1,4 +1,4 @@
-# Seam Harmonizer v1
+Т# Seam Harmonizer v1
 
 Internal strip-based seam harmonization project for ComfyUI workflows.
 

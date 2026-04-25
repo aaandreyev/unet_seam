@@ -84,6 +84,9 @@ def main() -> None:
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
     seed_everything(int(cfg.get("seed", 42)))
     device = pick_device()
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")
     synthetic_train_ds = _build_dataset(cfg, "train")
     real_train_ds = _build_real_dataset(cfg, "train")
     train_ds = synthetic_train_ds
@@ -102,7 +105,7 @@ def main() -> None:
     common = {"collate_fn": collate_strip_batch, "pin_memory": device.type == "cuda"}
     if num_workers > 0:
         common["persistent_workers"] = True
-        common["prefetch_factor"] = 2
+        common["prefetch_factor"] = 4
     train_loader = DataLoader(
         train_ds,
         batch_size=int(train_cfg["batch_size"]),
@@ -159,6 +162,9 @@ def main() -> None:
         start_epoch = int(state["epoch"]) + 1
         best_quality = _quality(((state.get("metrics") or {}).get("val") or {}))
         print(json.dumps({"event": "resumed", "start_epoch": start_epoch}, ensure_ascii=False), flush=True)
+    if device.type == "cuda":
+        # compile after EMA/checkpoint so deepcopy and state_dict loading happen on the plain model
+        model = torch.compile(model, mode="max-autotune")
     loss_cfg = cfg.get("loss") or {}
     loss_computer = HarmonizerLossComputer(
         outer_width=int(cfg["dataset"].get("outer_width", 128)),
