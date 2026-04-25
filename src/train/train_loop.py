@@ -117,16 +117,24 @@ def run_epoch(
                 scaler.scale(losses["total"]).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                _prev = optimizer._step_count
+                prev = getattr(optimizer, "_step_count", None)
                 scaler.step(optimizer)
                 scaler.update()
-                did_optim_step = optimizer._step_count > _prev
+                nxt = getattr(optimizer, "_step_count", None)
+                if prev is None or nxt is None:
+                    did_optim_step = True
+                else:
+                    did_optim_step = nxt > prev
             else:
                 losses["total"].backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                _prev = optimizer._step_count
+                prev = getattr(optimizer, "_step_count", None)
                 optimizer.step()
-                did_optim_step = optimizer._step_count > _prev
+                nxt = getattr(optimizer, "_step_count", None)
+                if prev is None or nxt is None:
+                    did_optim_step = True
+                else:
+                    did_optim_step = nxt > prev
             if scheduler is not None and did_optim_step:
                 scheduler.step()
             if ema is not None:
