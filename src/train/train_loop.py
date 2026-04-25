@@ -4,6 +4,7 @@ import contextlib
 import json
 import sys
 import time
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -136,7 +137,15 @@ def run_epoch(
                 else:
                     did_optim_step = nxt > prev
             if scheduler is not None and did_optim_step:
-                scheduler.step()
+                # Some Colab/optim builds omit optimizer._step_count; LRScheduler's internal
+                # then warns spuriously even when optimizer.step() already ran in this iteration.
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r"^Detected call of `lr_scheduler\.step\(\)` before",
+                        category=UserWarning,
+                    )
+                    scheduler.step()
             if ema is not None:
                 ema.update(model)
         metrics = evaluate_batch(pred.detach(), target, input_rgb, inner_mask, boundary, residual.detach())
