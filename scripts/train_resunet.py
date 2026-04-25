@@ -177,6 +177,9 @@ def main() -> None:
             current_epoch=epoch + 1,
             total_epochs=num_epochs,
         )
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
         # Flush before val: no train_step/val_step lines until a batch finishes; Colab may look "stuck".
         print(
             json.dumps(

@@ -94,22 +94,24 @@ def run_epoch(
         print(json.dumps(tpre, ensure_ascii=False), flush=True)
     _amp_device_types = frozenset({"cuda", "cpu", "mps", "hpu", "xpu", "mtia"})
     for batch in progress:
-        batch = _move(batch, device)
-        inputs = batch["input"]
-        input_rgb = batch["input_rgb"]
-        target = batch["target"]
-        inner_mask = batch["inner_region_mask"]
-        boundary = batch["boundary_band_mask"]
-        ad = inputs.device.type
-        if ad in _amp_device_types:
-            amp_ctx = autocast(device_type=ad, enabled=use_amp)
-        else:
-            amp_ctx = contextlib.nullcontext()
-        with amp_ctx:
-            residual = model(inputs)
-            pred = (input_rgb + residual).clamp(0.0, 1.0)
-            pred[:, :, :, :128] = input_rgb[:, :, :, :128]
-            losses = loss_computer(pred, target, input_rgb, inner_mask, boundary, residual)
+        # Val without this keeps autograd on forward/LPIPS — peak VRAM can OOM and kill the runtime after train.
+        with torch.inference_mode() if not train_mode else contextlib.nullcontext():
+            batch = _move(batch, device)
+            inputs = batch["input"]
+            input_rgb = batch["input_rgb"]
+            target = batch["target"]
+            inner_mask = batch["inner_region_mask"]
+            boundary = batch["boundary_band_mask"]
+            ad = inputs.device.type
+            if ad in _amp_device_types:
+                amp_ctx = autocast(device_type=ad, enabled=use_amp)
+            else:
+                amp_ctx = contextlib.nullcontext()
+            with amp_ctx:
+                residual = model(inputs)
+                pred = (input_rgb + residual).clamp(0.0, 1.0)
+                pred[:, :, :, :128] = input_rgb[:, :, :, :128]
+                losses = loss_computer(pred, target, input_rgb, inner_mask, boundary, residual)
         if train_mode:
             assert optimizer is not None
             optimizer.zero_grad(set_to_none=True)
@@ -148,7 +150,10 @@ def run_epoch(
                     scheduler.step()
             if ema is not None:
                 ema.update(model)
-        metrics = evaluate_batch(pred.detach(), target, input_rgb, inner_mask, boundary, residual.detach())
+        with torch.inference_mode():
+            metrics = evaluate_batch(
+                pred.detach(), target, input_rgb, inner_mask, boundary, residual.detach()
+            )
         per_sample_metrics.append(metrics)
         for key, value in losses.items():
             agg_losses[key] = agg_losses.get(key, 0.0) + float(value.detach().item())
