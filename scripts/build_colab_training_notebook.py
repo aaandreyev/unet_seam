@@ -242,7 +242,7 @@ def build_notebook() -> dict:
             "import shutil\n"
             "resume_path = None\n"
             "DRIVE_CKPT_DIR.mkdir(parents=True, exist_ok=True)\n"
-            "drive_last = DRIVE_CKPT_DIR / 'last.pt'\n"
+            "drive_last = DRIVE_CKPT_DIR / 'last_harmonizer.pt'\n"
             "if drive_last.exists():\n"
             "    LOCAL_CHECKPOINTS.mkdir(parents=True, exist_ok=True)\n"
             "    local_resume = LOCAL_CHECKPOINTS / 'resume_last.pt'\n"

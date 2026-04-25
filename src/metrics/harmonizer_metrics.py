@@ -15,16 +15,55 @@ def _inner(x: torch.Tensor, outer_width: int = 128) -> torch.Tensor:
     return x[..., outer_width:]
 
 
-def _mae_band(pred: torch.Tensor, target: torch.Tensor, width: int) -> float:
-    return float((pred[..., :width] - target[..., :width]).abs().mean().item())
+def _mae_band_mean(pred: torch.Tensor, target: torch.Tensor, width: int) -> float:
+    return (pred[..., :width] - target[..., :width]).abs().mean().item()
 
 
-def _grad_mae(pred: torch.Tensor, target: torch.Tensor) -> float:
+def _grad_mae_mean(pred: torch.Tensor, target: torch.Tensor) -> float:
     dxp = pred[..., :, 1:] - pred[..., :, :-1]
     dyp = pred[..., 1:, :] - pred[..., :-1, :]
     dxt = target[..., :, 1:] - target[..., :, :-1]
     dyt = target[..., 1:, :] - target[..., :-1, :]
-    return float((dxp - dxt).abs().mean().item() + (dyp - dyt).abs().mean().item())
+    return (dxp - dxt).abs().mean().item() + (dyp - dyt).abs().mean().item()
+
+
+def _harmonizer_metrics_torch(
+    pred_inner: torch.Tensor,
+    target_inner: torch.Tensor,
+    input_inner: torch.Tensor,
+    curves: torch.Tensor,
+    shading: torch.Tensor,
+) -> dict[str, float]:
+    """MAE / lowfreq / gradient / curve stats on device (single sync to scalars)."""
+    low_pred = gaussian_blur_tensor(pred_inner, 5.0)
+    low_target = gaussian_blur_tensor(target_inner, 5.0)
+    slopes = curves[..., 1:] - curves[..., :-1]
+    return {
+        "boundary_mae_8": _mae_band_mean(pred_inner, target_inner, 8),
+        "boundary_mae_16": _mae_band_mean(pred_inner, target_inner, 16),
+        "boundary_mae_32": _mae_band_mean(pred_inner, target_inner, 32),
+        "baseline_boundary_mae_16": _mae_band_mean(input_inner, target_inner, 16),
+        "lowfreq_mae": (low_pred - low_target).abs().mean().item(),
+        "gradient_mae": _grad_mae_mean(pred_inner, target_inner),
+        "curve_max_slope": slopes.max().item(),
+        "curve_min_slope": slopes.min().item(),
+        "shading_abs_mean": shading.abs().mean().item(),
+    }
+
+
+def evaluate_harmonizer_batch_fast(
+    corrected_strip: torch.Tensor,
+    input_rgb: torch.Tensor,
+    target: torch.Tensor,
+    curves: torch.Tensor,
+    shading: torch.Tensor,
+    outer_width: int = 128,
+) -> dict[str, float]:
+    """GPU-only train metrics: MAE bands, lowfreq, gradients, no CIEDE (no CPU/skimage)."""
+    pred_inner = _inner(corrected_strip, outer_width)
+    target_inner = _inner(target, outer_width)
+    input_inner = _inner(input_rgb, outer_width)
+    return _harmonizer_metrics_torch(pred_inner, target_inner, input_inner, curves, shading)
 
 
 def evaluate_harmonizer_batch(
@@ -38,13 +77,16 @@ def evaluate_harmonizer_batch(
     pred_inner = _inner(corrected_strip, outer_width)
     target_inner = _inner(target, outer_width)
     input_inner = _inner(input_rgb, outer_width)
+    out = _harmonizer_metrics_torch(pred_inner, target_inner, input_inner, curves, shading)
+
+    # CIEDE on CPU (val / eval) — only path that needs numpy+skimage
     pred_np = _to_numpy(pred_inner)
     target_np = _to_numpy(target_inner)
     input_np = _to_numpy(input_inner)
-    de16 = []
-    de32 = []
-    base_de16 = []
-    base_de32 = []
+    de16: list[float] = []
+    de32: list[float] = []
+    base_de16: list[float] = []
+    base_de32: list[float] = []
     for i in range(pred_np.shape[0]):
         mask16 = np.zeros((*pred_np.shape[1:3], 1), dtype=np.float32)
         mask32 = np.zeros_like(mask16)
@@ -54,21 +96,8 @@ def evaluate_harmonizer_batch(
         de32.append(boundary_ciede2000(pred_np[i], target_np[i], mask32))
         base_de16.append(boundary_ciede2000(input_np[i], target_np[i], mask16))
         base_de32.append(boundary_ciede2000(input_np[i], target_np[i], mask32))
-    low_pred = gaussian_blur_tensor(pred_inner, 5.0)
-    low_target = gaussian_blur_tensor(target_inner, 5.0)
-    slopes = curves[..., 1:] - curves[..., :-1]
-    return {
-        "boundary_mae_8": _mae_band(pred_inner, target_inner, 8),
-        "boundary_mae_16": _mae_band(pred_inner, target_inner, 16),
-        "boundary_mae_32": _mae_band(pred_inner, target_inner, 32),
-        "baseline_boundary_mae_16": _mae_band(input_inner, target_inner, 16),
-        "boundary_ciede2000_16": float(np.mean(de16)),
-        "boundary_ciede2000_32": float(np.mean(de32)),
-        "baseline_boundary_ciede2000_16": float(np.mean(base_de16)),
-        "baseline_boundary_ciede2000_32": float(np.mean(base_de32)),
-        "lowfreq_mae": float((low_pred - low_target).abs().mean().item()),
-        "gradient_mae": _grad_mae(pred_inner, target_inner),
-        "curve_max_slope": float(slopes.max().item()),
-        "curve_min_slope": float(slopes.min().item()),
-        "shading_abs_mean": float(shading.abs().mean().item()),
-    }
+    out["boundary_ciede2000_16"] = float(np.mean(de16))
+    out["boundary_ciede2000_32"] = float(np.mean(de32))
+    out["baseline_boundary_ciede2000_16"] = float(np.mean(base_de16))
+    out["baseline_boundary_ciede2000_32"] = float(np.mean(base_de32))
+    return out

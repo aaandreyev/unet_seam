@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from src.losses.harmonizer_losses import HarmonizerLossComputer
-from src.metrics.harmonizer_metrics import evaluate_harmonizer_batch
+from src.metrics.harmonizer_metrics import evaluate_harmonizer_batch, evaluate_harmonizer_batch_fast
 from src.train.ema import EMA
 
 
@@ -101,14 +101,17 @@ def run_harmonizer_epoch(
             if ema is not None:
                 ema.update(model)
         with torch.inference_mode():
-            metrics = evaluate_harmonizer_batch(
-                outputs["corrected_strip"].detach(),
-                batch["input_rgb"],
-                batch["target"],
-                outputs["curves"].detach(),
-                outputs["shading"].detach(),
-                outer_width=loss_computer.outer_width,
-            )
+            cs = outputs["corrected_strip"].detach()
+            cu = outputs["curves"].detach()
+            sh = outputs["shading"].detach()
+            if train_mode:
+                metrics = evaluate_harmonizer_batch_fast(
+                    cs, batch["input_rgb"], batch["target"], cu, sh, outer_width=loss_computer.outer_width
+                )
+            else:
+                metrics = evaluate_harmonizer_batch(
+                    cs, batch["input_rgb"], batch["target"], cu, sh, outer_width=loss_computer.outer_width
+                )
         per_sample_metrics.append(metrics)
         steps += 1
         for key, value in losses.items():
@@ -123,22 +126,20 @@ def run_harmonizer_epoch(
                 tb_writer.add_scalar(f"{tb_prefix}/metric/{key}", value / steps, gs)
             tb_writer.flush()
         if console_log_interval > 0 and (steps == 1 or steps % console_log_interval == 0 or steps == n_batches):
-            print(
-                json.dumps(
-                    {
-                        "event": "harmonizer_step",
-                        "desc": desc,
-                        "step": steps,
-                        "batches": n_batches,
-                        "loss_total": round(agg_losses["total"] / steps, 6),
-                        "mae16": round(agg_metrics["boundary_mae_16"] / steps, 6),
-                        "de16": round(agg_metrics["boundary_ciede2000_16"] / steps, 4),
-                        "sec": int(time.monotonic() - t0),
-                    },
-                    ensure_ascii=False,
-                ),
-                flush=True,
-            )
+            row: dict[str, Any] = {
+                "event": "harmonizer_step",
+                "desc": desc,
+                "step": steps,
+                "batches": n_batches,
+                "loss_total": round(agg_losses["total"] / steps, 6),
+                "mae16": round(agg_metrics["boundary_mae_16"] / steps, 6),
+                "sec": int(time.monotonic() - t0),
+            }
+            if train_mode:
+                row["lowfreq"] = round(agg_metrics["lowfreq_mae"] / steps, 6)
+            else:
+                row["de16"] = round(agg_metrics["boundary_ciede2000_16"] / steps, 4)
+            print(json.dumps(row, ensure_ascii=False), flush=True)
     if steps == 0:
         return HarmonizerEpochResult({}, {}, []), tb_global_step
     return (

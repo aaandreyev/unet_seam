@@ -6,16 +6,6 @@ import torch.nn.functional as F
 from torch import Tensor
 
 
-def _r(B: int, lo: float, hi: float, device: torch.device,
-       gen: torch.Generator | None = None) -> Tensor:
-    return torch.rand(B, 1, 1, 1, device=device, generator=gen) * (hi - lo) + lo
-
-
-def _prob(B: int, p: float, device: torch.device,
-          gen: torch.Generator | None = None) -> Tensor:
-    return (torch.rand(B, 1, 1, 1, device=device, generator=gen) < p).float()
-
-
 def _gaussian_kernel(size: int, sigma: float, C: int, device: torch.device) -> Tensor:
     x = torch.arange(size, dtype=torch.float32, device=device) - size // 2
     g = torch.exp(-x.pow(2) / (2 * sigma ** 2))
@@ -24,24 +14,40 @@ def _gaussian_kernel(size: int, sigma: float, C: int, device: torch.device) -> T
     return k.expand(C, 1, size, size).contiguous()
 
 
+def _planner_field_batched(
+    B: int, H: int, W: int, dev: torch.device, gen: torch.Generator | None, magnitude: float
+) -> Tensor:
+    """Batched version of corruptions._field: ax*xx + ay*yy, per sample."""
+    ax = torch.rand(B, 1, 1, 1, device=dev, generator=gen) * magnitude
+    ay = torch.rand(B, 1, 1, 1, device=dev, generator=gen) * magnitude
+    yy = torch.linspace(-1.0, 1.0, H, device=dev, dtype=torch.float32).view(1, 1, H, 1)
+    xx = torch.linspace(-1.0, 1.0, W, device=dev, dtype=torch.float32).view(1, 1, 1, W)
+    return ax * xx + ay * yy
+
+
 class GPUCorruption(nn.Module):
     """Randomized photometric + spatial corruptions on GPU.
 
-    Mirrors CPU corruption families A/B/C/D but fully vectorized across the batch.
-    All ops are in-place-free PyTorch — no PIL, no numpy, no Python loops.
+    Aligns with CPU `apply_random_corruptions`:
+    - Photometric: each op is included independently with its own p (mild A/B-style stack).
+    - Family C: at most *one* spatial op per sample, with probability ~0.35 (matches _maybe_add C).
+    - Family D: at most *one* of blur / microcontrast / noise / jpeg per sample, p ~0.25.
+
+    The previous version gated C and D on a single batch-wide coin flip and stacked multiple
+    C (or blur+noise) on one sample, which made GPU corruption much heavier than the dataset.
     """
 
-    def __init__(self, p_spatial: float = 0.35, p_pipeline: float = 0.25) -> None:
+    def __init__(self, p_c: float = 0.35, p_d: float = 0.25) -> None:
         super().__init__()
-        self.p_spatial = p_spatial
-        self.p_pipeline = p_pipeline
+        self.p_c = p_c
+        self.p_d = p_d
 
     @torch.no_grad()
     def forward(self, inner: Tensor, gen: torch.Generator | None = None) -> Tensor:
         """
         Args:
-            inner: B×3×H×W float in [0,1] — inner half of each strip.
-            gen:   optional RNG (pass per-step generator for reproducibility).
+            inner: B×3×H×W float in [0,1] — inner half to corrupt.
+            gen:   optional RNG for reproducibility.
         Returns:
             Corrupted B×3×H×W clamped to [0,1].
         """
@@ -49,97 +55,132 @@ class GPUCorruption(nn.Module):
         dev = inner.device
         x = inner.clone()
 
-        def r(lo: float, hi: float) -> Tensor:
-            return _r(B, lo, hi, dev, gen)
+        def rand(lo: float, hi: float) -> Tensor:
+            """B×1×1×1 uniform sample."""
+            return torch.rand(B, 1, 1, 1, device=dev, generator=gen) * (hi - lo) + lo
 
-        def p(prob: float) -> Tensor:
-            return _prob(B, prob, dev, gen)
+        def apply(original: Tensor, modified: Tensor, p: float) -> Tensor:
+            """Apply modified to original with per-sample probability p."""
+            mask = (torch.rand(B, 1, 1, 1, device=dev, generator=gen) < p).float()
+            return original + mask * (modified - original)
 
-        # ── Family A: global photometric ─────────────────────────────────────────
+        # ── Family A: global photometric (each op ~p=0.3–0.4) ─────────────────────
 
-        # Exposure (log-uniform ±~1 stop)
-        x = (x * torch.exp(r(-0.9, 0.9))).clamp(0, 1)
+        # Exposure (log-uniform ±1 stop)
+        x = apply(x, (x * torch.exp(rand(-1.0, 1.0))).clamp(0, 1), p=0.40)
 
         # Brightness
-        x = (x + r(-0.18, 0.18)).clamp(0, 1)
+        x = apply(x, (x + rand(-0.15, 0.15)).clamp(0, 1), p=0.35)
 
-        # Contrast (scale around per-image mean)
+        # Contrast (scale around image mean)
         mu = x.mean(dim=(1, 2, 3), keepdim=True)
-        x = ((x - mu) * r(0.5, 1.6) + mu).clamp(0, 1)
+        x = apply(x, ((x - mu) * rand(0.6, 1.5) + mu).clamp(0, 1), p=0.35)
 
         # Gamma
-        x = x.clamp(1e-7, 1.0).pow(r(0.5, 2.0))
+        x = apply(x, x.clamp(1e-7, 1).pow(rand(0.5, 2.0)), p=0.30)
 
-        # Per-channel gain (color cast / tint)
-        gains = torch.rand(B, 3, 1, 1, device=dev, generator=gen) * (1.25 - 0.75) + 0.75
-        x = (x * gains).clamp(0, 1)
+        # Per-channel gain (color cast)
+        gains = torch.rand(B, 3, 1, 1, device=dev, generator=gen) * (1.2 - 0.8) + 0.8
+        x = apply(x, (x * gains).clamp(0, 1), p=0.35)
 
         # Saturation
         lum = 0.2126 * x[:, 0:1] + 0.7152 * x[:, 1:2] + 0.0722 * x[:, 2:3]
-        x = (lum + (x - lum) * r(0.2, 1.8)).clamp(0, 1)
+        x = apply(x, (lum + (x - lum) * rand(0.3, 1.7)).clamp(0, 1), p=0.30)
 
-        # Temperature (warm R↑B↓ / cool R↓B↑)
-        t = r(-0.12, 0.12)
-        x = torch.cat([(x[:, 0:1] + t).clamp(0, 1), x[:, 1:2],
-                       (x[:, 2:3] - t).clamp(0, 1)], dim=1)
+        # Temperature (warm/cool shift)
+        t = rand(-0.10, 0.10)
+        warm = torch.cat([(x[:, 0:1] + t).clamp(0, 1), x[:, 1:2],
+                          (x[:, 2:3] - t).clamp(0, 1)], dim=1)
+        x = apply(x, warm, p=0.30)
 
         # Black-point lift
-        bp = r(0.0, 0.12)
-        x = (x * (1 - bp) + bp).clamp(0, 1)
+        x = apply(x, (x + rand(0.0, 0.10) * (1 - x)).clamp(0, 1), p=0.25)
 
         # White-point compression
-        x = (x * r(0.85, 1.0)).clamp(0, 1)
+        x = apply(x, (x * rand(0.88, 1.0)).clamp(0, 1), p=0.25)
 
-        # ── Family B: tonal curves ────────────────────────────────────────────────
+        # ── Family B: tonal curves (~p=0.20 each) ────────────────────────────────
 
-        # Shadow adjustment (weight strongest in dark areas)
-        sw = (1 - x).pow(2)
-        x = (x + r(-0.08, 0.15) * sw).clamp(0, 1)
+        # Shadow lift / crush
+        shadow_w = (1 - x).pow(2)
+        x = apply(x, (x + rand(-0.08, 0.12) * shadow_w).clamp(0, 1), p=0.20)
 
-        # S-curve / inverse-S via polynomial  y = x + α·x(1−x)(2x−1)
-        alpha = r(-0.6, 0.6)
-        x = (x + alpha * x * (1 - x) * (2 * x - 1)).clamp(0, 1)
+        # S-curve / inverse-S  (polynomial: y = x + α·x(1−x)(2x−1))
+        alpha = rand(-0.5, 0.5)
+        x = apply(x, (x + alpha * x * (1 - x) * (2 * x - 1)).clamp(0, 1), p=0.20)
 
         # Highlight scale
-        hw = x.pow(2)
-        x = (x + r(-0.15, 0.15) * hw).clamp(0, 1)
+        hi_w = x.pow(2)
+        x = apply(x, (x + rand(-0.10, 0.10) * hi_w).clamp(0, 1), p=0.20)
 
-        # ── Family C: smooth spatial fields (~35 % of samples) ───────────────────
+        # ── Family C: at most one spatial op per sample (p ≈ 0.35) ──────────────
+        m_c = (torch.rand(B, 1, 1, 1, device=dev, generator=gen) < self.p_c).float()
+        choice_c = (torch.rand(B, device=dev, generator=gen) * 5.0).long().clamp(0, 4)
+        # unsqueeze(1): (B,1,1,1,1) so (B,1,1,1,1) * (B,5,1,1,1) broadcasts on class dim, not batch
+        m_k = m_c.unsqueeze(1) * (F.one_hot(choice_c, 5).view(B, 5, 1, 1, 1).float())
 
-        m_c = p(self.p_spatial)                                  # B×1×1×1 mask
+        # k=0 horizontal luma
+        h_grad = torch.linspace(-1.0, 1.0, W, device=dev, dtype=x.dtype).view(1, 1, 1, W)
+        u0 = (torch.rand(B, 1, 1, 1, device=dev, generator=gen) * 0.24 - 0.12)
+        eff0 = (x + h_grad * u0).clamp(0, 1)
+        x = x + m_k[:, 0] * (eff0 - x)
 
-        # Smooth illumination / shading field  (4×4 → H×W bilinear)
-        lum_lr = torch.rand(B, 1, 4, 4, device=dev, generator=gen) * 0.5 - 0.25
-        lum_field = F.interpolate(lum_lr, size=(H, W), mode="bilinear", align_corners=False)
-        x = (x * (1 + lum_field * m_c)).clamp(0, 1)
+        # k=1 vertical luma
+        v_grad = torch.linspace(-1.0, 1.0, H, device=dev, dtype=x.dtype).view(1, 1, H, 1)
+        u1 = (torch.rand(B, 1, 1, 1, device=dev, generator=gen) * 0.24 - 0.12)
+        eff1 = (x + v_grad * u1).clamp(0, 1)
+        x = x + m_k[:, 1] * (eff1 - x)
 
-        # Smooth color-temperature field
-        t_lr = torch.rand(B, 1, 4, 4, device=dev, generator=gen) * 0.2 - 0.1
-        t_field = F.interpolate(t_lr, size=(H, W), mode="bilinear", align_corners=False) * m_c
-        x = torch.cat([(x[:, 0:1] + t_field).clamp(0, 1),
-                       x[:, 1:2],
-                       (x[:, 2:3] - t_field).clamp(0, 1)], dim=1)
+        # k=2 illumination field (CPU: x * (1 + _field(..., 0.10)))
+        field2 = _planner_field_batched(B, H, W, dev, gen, 0.10)
+        eff2 = (x * (1.0 + field2)).clamp(0, 1)
+        x = x + m_k[:, 2] * (eff2 - x)
 
-        # Horizontal luminance ramp (seam-direction drift)
-        grad = torch.linspace(0, 1, W, device=dev).view(1, 1, 1, W)
-        x = (x + grad * r(-0.2, 0.2) * m_c).clamp(0, 1)
+        # k=3 temperature field
+        field3 = _planner_field_batched(B, H, W, dev, gen, 0.10)
+        eff3 = torch.cat(
+            [
+                (x[:, 0:1] + field3).clamp(0, 1),
+                x[:, 1:2],
+                (x[:, 2:3] - field3 * 0.8).clamp(0, 1),
+            ],
+            dim=1,
+        )
+        x = x + m_k[:, 3] * (eff3 - x)
 
-        # Vertical luminance ramp
-        vgrad = torch.linspace(0, 1, H, device=dev).view(1, 1, H, 1)
-        x = (x + vgrad * r(-0.15, 0.15) * m_c).clamp(0, 1)
+        # k=4 saturation field
+        field4 = _planner_field_batched(B, H, W, dev, gen, 0.20)
+        luma4 = 0.2126 * x[:, 0:1] + 0.7152 * x[:, 1:2] + 0.0722 * x[:, 2:3]
+        sat_mul = (1.0 + field4).clamp(0.7, 1.3)
+        eff4 = (luma4 + (x - luma4) * sat_mul).clamp(0, 1)
+        x = x + m_k[:, 4] * (eff4 - x)
 
-        # ── Family D: pipeline artifacts (~25 % of samples) ──────────────────────
+        # ── Family D: at most one of blur / microcontrast / noise / jpeg (p ≈ 0.25) ─
+        m_d = (torch.rand(B, 1, 1, 1, device=dev, generator=gen) < self.p_d).float()
+        choice_d = (torch.rand(B, device=dev, generator=gen) * 4.0).long().clamp(0, 3)
+        m_dk = m_d.unsqueeze(1) * (F.one_hot(choice_d, 4).view(B, 4, 1, 1, 1).float())
 
-        m_d = p(self.p_pipeline)
+        # d=0 Gaussian blur
+        k_blur = _gaussian_kernel(5, 1.2, C, dev)
+        blurred0 = F.conv2d(x, k_blur, padding=2, groups=C)
+        x = x + m_dk[:, 0] * (blurred0 - x)
 
-        # Gaussian blur (fixed 5×5, sigma≈1.2)
-        k = _gaussian_kernel(5, 1.2, C, dev)
-        blurred = F.conv2d(x, k, padding=2, groups=C)
-        x = torch.where(m_d > 0, blurred, x)
+        # d=1 microcontrast
+        k_sharp = _gaussian_kernel(5, 1.0, C, dev)
+        blurred1 = F.conv2d(x, k_sharp, padding=2, groups=C)
+        amount = torch.rand(B, 1, 1, 1, device=dev, generator=gen) * 0.1
+        eff_m = (x + (x - blurred1) * amount).clamp(0, 1)
+        x = x + m_dk[:, 1] * (eff_m - x)
 
-        # Additive Gaussian noise
-        noise_std = r(0.0, 0.025) * m_d
-        noise = torch.randn(B, C, H, W, device=dev, generator=gen)
-        x = (x + noise * noise_std).clamp(0, 1)
+        # d=2 noise
+        sig = torch.rand(B, 1, 1, 1, device=dev, generator=gen) * 0.01
+        noise = torch.randn(B, C, H, W, device=dev, generator=gen) * sig
+        eff_n = (x + noise).clamp(0, 1)
+        x = x + m_dk[:, 2] * (eff_n - x)
+
+        # d=3 JPEG-like quantize
+        levels = 64.0 + torch.rand(B, 1, 1, 1, device=dev, generator=gen) * 95.0
+        eff_j = (torch.round(x.clamp(0, 1) * levels) / levels).clamp(0, 1)
+        x = x + m_dk[:, 3] * (eff_j - x)
 
         return x
