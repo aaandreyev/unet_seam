@@ -81,6 +81,16 @@ def run_epoch(
         if wall_t0 is not None:
             vpre["sec_since_train_start"] = int(time.perf_counter() - wall_t0)
         print(json.dumps(vpre, ensure_ascii=False), flush=True)
+    if train_mode and console_log_interval > 0 and n_batches is not None:
+        tpre: dict[str, Any] = {
+            "event": "train_iter_begin",
+            "desc": desc,
+            "batches_in_epoch": n_batches,
+            "note": "first DataLoader batch + 1st forward/backward can take minutes; next: train_step",
+        }
+        if wall_t0 is not None:
+            tpre["sec_since_train_start"] = int(time.perf_counter() - wall_t0)
+        print(json.dumps(tpre, ensure_ascii=False), flush=True)
     _amp_device_types = frozenset({"cuda", "cpu", "mps", "hpu", "xpu", "mtia"})
     for batch in progress:
         batch = _move(batch, device)

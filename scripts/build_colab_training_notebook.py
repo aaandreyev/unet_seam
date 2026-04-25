@@ -286,7 +286,7 @@ def build_notebook() -> dict:
             "if resume_path is not None:\n"
             "    cmd += ['--resume', str(resume_path)]\n"
             "print('TRAIN CMD:', ' '.join(map(str, cmd)))\n"
-            "print('Дальше: «loading PyTorch…», JSON (train_start / val_begin / train_step / epoch_end). -u + PYTHONUNBUFFERED.')\n"
+            "print('Дальше: loading, train_start, epoch_begin, train_iter_begin (затем пауза до первого train_step — нормально: 1-й батч + воркеры + GPU).')\n"
             "def _stream_cmd(cmd, cwd, env):\n"
             "    # Colab: inherited stdio often shows nothing; PIPE + a thread that prints to the cell is reliable. Main thread only p.wait() (not read()).\n"
             "    p = subprocess.Popen(\n"
