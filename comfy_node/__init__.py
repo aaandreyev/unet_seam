@@ -12,13 +12,13 @@ if str(NODE_ROOT) not in sys.path:
     sys.path.insert(0, str(NODE_ROOT))
 
 try:
-    from .seam_corrector_node import SeamHarmonizerV1Node
+    from .seam_corrector_node import SeamHarmonizerV3Node
 except ImportError:
-    from seam_corrector_node import SeamHarmonizerV1Node
+    from seam_corrector_node import SeamHarmonizerV3Node
 
 NODE_CLASS_MAPPINGS = {
-    "SeamHarmonizerV1": SeamHarmonizerV1Node,
+    "SeamHarmonizerV3": SeamHarmonizerV3Node,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "SeamHarmonizerV1": "Seam Harmonizer v1",
+    "SeamHarmonizerV3": "Seam Harmonizer v3",
 }

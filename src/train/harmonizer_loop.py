@@ -12,6 +12,7 @@ from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
+from src.data.harmonizer_input import build_harmonizer_input
 from src.losses.harmonizer_losses import HarmonizerLossComputer
 from src.metrics.harmonizer_metrics import evaluate_harmonizer_batch, evaluate_harmonizer_batch_fast
 from src.train.ema import EMA
@@ -46,6 +47,7 @@ def run_harmonizer_epoch(
     console_log_interval: int = 25,
     gpu_corruption: torch.nn.Module | None = None,
     outer_width: int = 128,
+    boundary_band_px: int = 24,
 ) -> tuple[HarmonizerEpochResult, int]:
     train_mode = optimizer is not None
     model.train(train_mode)
@@ -67,10 +69,20 @@ def run_harmonizer_epoch(
             inner = clean_strip[:, :, :, outer_width:]
             corrupted_inner = gpu_corruption(inner)
             corrupted_strip = torch.cat([clean_strip[:, :, :, :outer_width], corrupted_inner], dim=-1)
+            seam_x = torch.tensor(
+                [float(meta.get("seam_x", outer_width)) for meta in batch.get("meta", [])],
+                device=corrupted_strip.device,
+                dtype=corrupted_strip.dtype,
+            )
+            rebuilt = build_harmonizer_input(
+                corrupted_strip,
+                outer_width=outer_width,
+                boundary_band_px=boundary_band_px,
+                seam_x=seam_x if seam_x.numel() > 0 else outer_width,
+            )
             batch = {
                 **batch,
-                "input": torch.cat([corrupted_strip, batch["input"][:, 3:]], dim=1),
-                "input_rgb": corrupted_strip,  # baseline metrics must see the corrupted input
+                **rebuilt,
             }
         if device.type == "cuda" and "input" in batch:
             batch = {**batch, "input": batch["input"].to(memory_format=torch.channels_last)}
@@ -82,7 +94,7 @@ def run_harmonizer_epoch(
                 amp_ctx = contextlib.nullcontext()
             with amp_ctx:
                 outputs = model(batch["input"])
-                losses = loss_computer(outputs, batch["target"])
+                losses = loss_computer(outputs, batch)
         if train_mode:
             assert optimizer is not None
             optimizer.zero_grad(set_to_none=True)
@@ -102,15 +114,13 @@ def run_harmonizer_epoch(
                 ema.update(model)
         with torch.inference_mode():
             cs = outputs["corrected_strip"].detach()
-            cu = outputs["curves"].detach()
-            sh = outputs["shading"].detach()
             if train_mode:
                 metrics = evaluate_harmonizer_batch_fast(
-                    cs, batch["input_rgb"], batch["target"], cu, sh, outer_width=loss_computer.outer_width
+                    cs, batch["input_rgb"], batch["target"], outputs, None, outer_width=loss_computer.outer_width
                 )
             else:
                 metrics = evaluate_harmonizer_batch(
-                    cs, batch["input_rgb"], batch["target"], cu, sh, outer_width=loss_computer.outer_width
+                    cs, batch["input_rgb"], batch["target"], outputs, None, outer_width=loss_computer.outer_width
                 )
         per_sample_metrics.append(metrics)
         steps += 1

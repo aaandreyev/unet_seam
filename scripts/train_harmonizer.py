@@ -16,7 +16,7 @@ from src.data.real_strip_dataset import RealPairedStripDataset
 from src.data.strip_geometry import StripSpec
 from src.data.synthetic_strip_dataset import SyntheticStripDataset, collate_strip_batch
 from src.losses.harmonizer_losses import HarmonizerLossComputer
-from src.models.harmonizer import SeamHarmonizerV1
+from src.models.harmonizer import SeamHarmonizerV3
 from src.train.checkpoint import load_checkpoint, restore_rng_state, save_training_checkpoint
 from src.train.ema import EMA
 from src.train.harmonizer_loop import run_harmonizer_epoch
@@ -54,6 +54,18 @@ def _quality(metrics: dict[str, float]) -> float:
     low = metrics.get("lowfreq_mae", 1.0)
     no_improve = max(de - base, 0.0) * 2.0
     return de + 200.0 * mae + 50.0 * low + no_improve
+
+
+def _load_matching_state(module: torch.nn.Module, state_dict: dict[str, torch.Tensor]) -> dict[str, int]:
+    current = module.state_dict()
+    matched = {
+        key: value
+        for key, value in state_dict.items()
+        if key in current and isinstance(value, torch.Tensor) and current[key].shape == value.shape
+    }
+    current.update(matched)
+    module.load_state_dict(current)
+    return {"matched": len(matched), "skipped": len(state_dict) - len(matched)}
 
 
 def _build_dataset(cfg: dict[str, Any], split: str, apply_corruption: bool = True) -> SyntheticStripDataset:
@@ -107,8 +119,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/train_harmonizer_v1.yaml")
     parser.add_argument("--resume", default=None)
+    parser.add_argument("--load-weights", default=None)
     parser.add_argument("--max-epochs", type=int, default=None)
+    parser.add_argument("--additional-epochs", type=int, default=None)
     args = parser.parse_args()
+    if args.resume and args.load_weights:
+        raise ValueError("--resume and --load-weights are mutually exclusive")
+    if args.max_epochs is not None and args.additional_epochs is not None:
+        raise ValueError("--max-epochs and --additional-epochs are mutually exclusive")
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
     seed_everything(int(cfg.get("seed", 42)))
     device = pick_device()
@@ -128,6 +146,9 @@ def main() -> None:
         sampler = WeightedRandomSampler(weights, num_samples=len(train_ds), replacement=True)
         shuffle = False
     val_ds = _build_dataset(cfg, "val")
+    real_val_ds = _build_real_dataset(cfg, "val")
+    if real_val_ds is not None and len(real_val_ds) > 0:
+        val_ds = ConcatDataset([real_val_ds, val_ds])
     train_cfg = cfg["train"]
     num_workers = int(train_cfg.get("num_workers", 4))
     common = {"collate_fn": collate_strip_batch, "pin_memory": device.type == "cuda"}
@@ -153,12 +174,12 @@ def main() -> None:
         **common,
     )
     model_cfg = cfg.get("model") or {}
-    model = SeamHarmonizerV1(
+    model = SeamHarmonizerV3(
+        in_channels=int(model_cfg.get("in_channels", 9)),
         channels=tuple(model_cfg.get("channels", [32, 64, 128, 192])),
         blocks=tuple(model_cfg.get("blocks", [2, 2, 4, 6])),
-        num_knots=int(model_cfg.get("num_knots", 16)),
-        alpha=float(model_cfg.get("alpha", 0.20)),
         outer_width=int(cfg["dataset"].get("outer_width", 128)),
+        boundary_band_px=int(cfg["dataset"].get("boundary_band_px", 24)),
     ).to(device)
     if device.type == "cuda":
         model = model.to(memory_format=torch.channels_last)
@@ -181,7 +202,8 @@ def main() -> None:
     # GradScaler only needed for fp16; bf16 has fp32-range exponent and doesn't need loss scaling
     scaler_enabled = use_amp and precision == "fp16"
     scaler = GradScaler("cuda", enabled=scaler_enabled) if device.type == "cuda" else GradScaler("cpu", enabled=False)
-    total_epochs = int(args.max_epochs if args.max_epochs is not None else train_cfg["num_epochs"])
+    base_total_epochs = int(train_cfg["num_epochs"])
+    total_epochs = int(args.max_epochs if args.max_epochs is not None else base_total_epochs)
     scheduler = cosine_with_warmup(
         optimizer,
         warmup_steps=int(cfg.get("scheduler", {}).get("warmup_steps", 1000)),
@@ -203,11 +225,46 @@ def main() -> None:
         restore_rng_state(state.get("rng_state", {}))
         start_epoch = int(state["epoch"]) + 1
         best_quality = _quality(((state.get("metrics") or {}).get("val") or {}))
+        if args.additional_epochs is not None:
+            total_epochs = start_epoch + int(args.additional_epochs)
         print(json.dumps({"event": "resumed", "start_epoch": start_epoch}, ensure_ascii=False), flush=True)
+    elif args.load_weights:
+        state = load_checkpoint(Path(args.load_weights), map_location=device.type)
+        model_stats = _load_matching_state(model, state["model"])
+        ema_stats = _load_matching_state(ema.model, state["ema"])
+        if args.additional_epochs is not None:
+            total_epochs = int(args.additional_epochs)
+        print(
+            json.dumps(
+                {
+                    "event": "loaded_weights",
+                    "checkpoint": args.load_weights,
+                    "epochs": total_epochs,
+                    "model_match": model_stats,
+                    "ema_match": ema_stats,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+    if total_epochs <= start_epoch:
+        raise ValueError(
+            f"Nothing to train: start_epoch={start_epoch}, total_epochs={total_epochs}. "
+            "Use --additional-epochs for resume or increase --max-epochs / train.num_epochs."
+        )
+    if args.resume or args.load_weights:
+        scheduler = cosine_with_warmup(
+            optimizer,
+            warmup_steps=int(cfg.get("scheduler", {}).get("warmup_steps", 1000)),
+            total_steps=max(len(train_loader) * total_epochs, 1),
+            min_lr_scale=float(cfg.get("scheduler", {}).get("min_lr_scale", 0.005)),
+        )
+        if args.resume:
+            if state.get("scheduler") is not None:
+                scheduler.load_state_dict(state["scheduler"])
     loss_cfg = cfg.get("loss") or {}
     loss_computer = HarmonizerLossComputer(
         outer_width=int(cfg["dataset"].get("outer_width", 128)),
-        seam_tau=float(loss_cfg.get("seam_tau", 12.0)),
         low_sigma=float(loss_cfg.get("low_sigma", 5.0)),
         weights={k: float(v) for k, v in (loss_cfg.get("weights") or {}).items()},
     )
@@ -251,6 +308,7 @@ def main() -> None:
             console_log_interval=int(log_cfg.get("console_log_interval", 25)),
             gpu_corruption=gpu_corruption,
             outer_width=outer_width,
+            boundary_band_px=int(cfg["dataset"].get("boundary_band_px", 24)),
         )
         val_result, _ = run_harmonizer_epoch(
             ema.model,

@@ -6,7 +6,7 @@ import time
 
 import torch
 
-from src.models.harmonizer import SeamHarmonizerV1
+from src.models.harmonizer import SeamHarmonizerV3
 from src.utils.device import pick_device
 
 
@@ -17,8 +17,8 @@ def main() -> None:
     parser.add_argument("--iters", type=int, default=20)
     args = parser.parse_args()
     device = pick_device()
-    model = SeamHarmonizerV1().to(device).eval()
-    x = torch.rand(args.batch_size, 5, 1024, 256, device=device)
+    model = SeamHarmonizerV3().to(device).eval()
+    x = torch.rand(args.batch_size, 9, 1024, 256, device=device)
     with torch.inference_mode():
         for _ in range(args.warmup):
             model(x)

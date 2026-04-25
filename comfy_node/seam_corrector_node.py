@@ -16,14 +16,14 @@ except ImportError:
 from src.infer.correct_full_frame import apply_corrector_to_full_frame
 
 
-class SeamHarmonizerV1Node:
+class SeamHarmonizerV3Node:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "IMAGE": ("IMAGE",),
                 "MASK": ("MASK",),
-                "model_path": ("STRING", {"default": "outputs/exports/seam_harmonizer_v1.safetensors"}),
+                "model_path": ("STRING", {"default": "outputs/exports/seam_harmonizer_v3.safetensors"}),
                 "inner_width": ("INT", {"default": 128}),
                 "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
                 "process_left": ("BOOLEAN", {"default": True}),
@@ -39,13 +39,14 @@ class SeamHarmonizerV1Node:
     CATEGORY = "seam"
 
     def run(self, IMAGE, MASK, model_path, inner_width, strength, process_left, process_right, process_top, process_bottom, debug_previews):
-        model, sidecar = load_model(model_path, device="cpu")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model, sidecar = load_model(model_path, device=device)
         if inner_width not in sidecar["strip"]["supported_inner_widths"]:
             raise RuntimeError(f"Unsupported inner_width={inner_width}")
         image = IMAGE.permute(0, 3, 1, 2).contiguous()
         mask = MASK.unsqueeze(1).float()
         if rectangularity(mask) < 0.9:
-            raise RuntimeError("v1 supports only rectangular masks")
+            raise RuntimeError("v3 supports only rectangular masks")
         bbox = mask_bbox(mask)
         x0, y0, x1, y1 = bbox
         if min(x1 - x0, y1 - y0) < 64:
@@ -66,6 +67,8 @@ class SeamHarmonizerV1Node:
             self._write_debug(debug, image, corrected)
         corrected[:, :, :, :x0] = image[:, :, :, :x0]
         corrected[:, :, :, x1:] = image[:, :, :, x1:]
+        corrected[:, :, :y0, :] = image[:, :, :y0, :]
+        corrected[:, :, y1:, :] = image[:, :, y1:, :]
         return (corrected.permute(0, 2, 3, 1).contiguous(),)
 
     def _write_debug(self, debug: dict, image: torch.Tensor, corrected: torch.Tensor) -> None:
@@ -80,16 +83,14 @@ class SeamHarmonizerV1Node:
             self._save_tensor((delta[0] + 0.5).clamp(0.0, 1.0), root / f"side_{side}_delta.png")
         for side, weight in debug.get("weights", {}).items():
             self._save_tensor(weight[0].repeat(3, 1, 1), root / f"weight_map_{side}.png")
-        shading = debug.get("shading_lowres")
-        if isinstance(shading, torch.Tensor):
-            for i in range(min(shading.shape[0], 4)):
-                preview = shading[i].repeat(3, 1, 1)
-                preview = (preview - preview.min()) / (preview.max() - preview.min()).clamp_min(1e-6)
-                self._save_tensor(preview, root / f"shading_lowres_{i}.png")
-        curves = debug.get("curves")
+        for key in ("gain_lowres", "gamma_lowres", "gate_lowres"):
+            value = debug.get(key)
+            if isinstance(value, torch.Tensor):
+                for i in range(min(value.shape[0], 4)):
+                    preview = value[i].repeat(3, 1, 1)
+                    preview = (preview - preview.min()) / (preview.max() - preview.min()).clamp_min(1e-6)
+                    self._save_tensor(preview, root / f"{key}_{i}.png")
         summary = {"per_side": debug.get("per_side", {})}
-        if isinstance(curves, torch.Tensor):
-            summary["curves"] = curves.tolist()
         (root / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     @staticmethod

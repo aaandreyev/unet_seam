@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import torch
 
+from src.data.harmonizer_input import build_harmonizer_input
 from src.data.structural_filter import gradient_cosine_similarity
 from src.infer.extract_strips import extract_active_strips
 from src.infer.merge_bands import merge_side_deltas
@@ -11,15 +12,8 @@ def _model_device(model: torch.nn.Module) -> torch.device:
     return next(model.parameters()).device
 
 
-def _canonical_model_input(strip_batch: torch.Tensor, outer_width: int) -> torch.Tensor:
-    _, _, height, width = strip_batch.shape
-    inner_width = width - outer_width
-    xs = torch.arange(width, device=strip_batch.device, dtype=strip_batch.dtype).view(1, 1, 1, width)
-    mask = (xs >= outer_width).to(strip_batch.dtype).expand(strip_batch.shape[0], 1, height, width)
-    inner_u = (xs - outer_width).clamp(min=0.0)
-    distance = (inner_u / float(max(inner_width - 1, 1))).clamp(0.0, 1.0)
-    distance = distance.expand(strip_batch.shape[0], 1, height, width)
-    return torch.cat([strip_batch, mask, distance], dim=1)
+def _canonical_model_input(strip_batch: torch.Tensor, outer_width: int, boundary_band_px: int = 24) -> torch.Tensor:
+    return build_harmonizer_input(strip_batch, outer_width=outer_width, boundary_band_px=boundary_band_px, seam_x=outer_width)["input"]
 
 
 def _inner_taper(height: int, inner_width: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -62,20 +56,21 @@ def apply_corrector_to_full_frame(
     side_order = list(outputs.keys())
     if not side_order:
         return image, {"per_side": {}, "weights": {}, "side_deltas": {}, "merged_delta": torch.zeros_like(image)}
-    outer_width = 128
+    outer_width = int(getattr(model, "outer_width", 128))
     strip_batch = torch.stack([outputs[side]["strip"] for side in side_order], dim=0)
-    model_in = _canonical_model_input(strip_batch, outer_width).to(_model_device(model))
+    boundary_band_px = int(getattr(model, "boundary_band_px", 24))
+    model_in = _canonical_model_input(strip_batch, outer_width, boundary_band_px=boundary_band_px).to(_model_device(model))
     with torch.inference_mode():
         model_out = model(model_in)
     if isinstance(model_out, dict):
         inner_delta = (model_out["corrected_inner"] - model_in[:, :3, :, outer_width:]).cpu()
         taper = _inner_taper(inner_delta.shape[-2], inner_delta.shape[-1], inner_delta.device, inner_delta.dtype)
         inner_delta = inner_delta * taper
-        debug["architecture"] = "seam_harmonizer_v1"
-        debug["curves"] = model_out["curves"].detach().cpu()
-        debug["shading_lowres"] = model_out["shading_lowres"].detach().cpu()
+        debug["architecture"] = "seam_harmonizer_v3"
+        for key in ("gain_lowres", "gamma_lowres", "bias_lowres", "detail_lowres", "gate_lowres"):
+            debug[key] = model_out[key].detach().cpu()
     else:
-        raise RuntimeError("SeamHarmonizerV1 inference requires dict outputs with corrected_inner")
+        raise RuntimeError("SeamHarmonizerV3 inference requires dict outputs with corrected_inner")
     for i, side in enumerate(side_order):
         delta_inner = inner_delta[i : i + 1]
         side_deltas[side] = torch.zeros_like(image)

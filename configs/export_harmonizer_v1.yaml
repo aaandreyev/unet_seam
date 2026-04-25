@@ -1,4 +1,4 @@
 checkpoint: outputs/checkpoints/best_harmonizer_quality.pt
 export_root: outputs/exports
-model_name: seam_harmonizer_v1
+model_name: seam_harmonizer_v3
 strength_default: 1.0

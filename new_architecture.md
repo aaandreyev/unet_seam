@@ -133,12 +133,20 @@ This makes:
 
 Each sample input tensor:
 
-- shape: `B x 5 x 1024 x 256`
+- shape: `B x 9 x 1024 x 256`
 
 Channels:
 1. `RGB strip` — 3 channels
 2. `inner_mask` — 1 channel
 3. `distance_to_seam` — 1 channel
+4. `boundary_band_mask` — 1 channel (1 within `boundary_band_px` of the seam, 0 elsewhere)
+5. `decay_mask` — 1 channel (cosine decay from seam across inner half)
+6. `luma` — 1 channel (BT.709 luminance of the strip)
+7. `gradient_magnitude` — 1 channel (luma gradient magnitude)
+
+> **Implementation note:** The v3 model uses 9 input channels instead of the original 5.
+> Channels 4–7 give the model explicit access to seam proximity, local frequency, and
+> luminance information without requiring it to relearn these from RGB alone.
 
 ### Channel semantics
 
@@ -372,10 +380,10 @@ This is the final recommended backbone family for v1.
 ## 7.2 Encoder specification
 
 ### Input
-`B x 5 x 1024 x 256`
+`B x 9 x 1024 x 256`
 
 ### Stem
-- `Conv3x3`, `5 -> 32`
+- `Conv3x3`, `9 -> 32`
 
 ### Encoder stages
 - Stage 1:

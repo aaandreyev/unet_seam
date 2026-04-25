@@ -24,7 +24,7 @@ def code(text: str) -> dict:
 def build_notebook() -> dict:
     cells = [
         md(
-            "# Seam Harmonizer v1 Colab Notebook\n\n"
+            "# Seam Harmonizer v3 Colab Notebook\n\n"
             "Готовый ноутбук для **training -> validation -> eval -> export -> verify reload**.\n\n"
             "Локально нужно заранее собрать training bundle через `scripts/build_final_training_bundle.py`, "
             "загрузить `.tar.gz` на Google Drive и указать путь в параметрах ниже."
@@ -35,7 +35,7 @@ def build_notebook() -> dict:
             "import os\n\n"
             "DATASET_BUNDLE_DRIVE_PATH = '/content/drive/MyDrive/unet_seam/seam_harmonizer_training_bundle.tar.gz'\n"
             "DRIVE_RUNS_DIR = '/content/drive/MyDrive/unet_seam_runs'\n"
-            "RUN_NAME = 'seam_harmonizer_v1_run001'\n"
+            "RUN_NAME = 'seam_harmonizer_v3_run001'\n"
             "REPO_CLONE_URL = 'https://github.com/aaandreyev/unet_seam.git'\n"
             "REPO_CLONE_REF = 'main'\n"
             "RUNTIME_ZIP_URL = ''\n"
@@ -238,20 +238,7 @@ def build_notebook() -> dict:
             "print('runtime configs ->', PROJECT_ROOT / 'runtime_configs')\n"
         ),
         code(
-            "# 8. OPTIONAL RESUME FROM DRIVE LAST CHECKPOINT\n"
-            "import shutil\n"
-            "resume_path = None\n"
-            "DRIVE_CKPT_DIR.mkdir(parents=True, exist_ok=True)\n"
-            "drive_last = DRIVE_CKPT_DIR / 'last_harmonizer.pt'\n"
-            "if drive_last.exists():\n"
-            "    LOCAL_CHECKPOINTS.mkdir(parents=True, exist_ok=True)\n"
-            "    local_resume = LOCAL_CHECKPOINTS / 'resume_last.pt'\n"
-            "    shutil.copy2(drive_last, local_resume)\n"
-            "    resume_path = local_resume\n"
-            "print('resume_path =', resume_path)\n"
-        ),
-        code(
-            "# 9. BACKGROUND SYNC TO DRIVE (eval/exports on Drive only after you run cells 11–12; checkpoints sync during train if this cell ran before 10)\n"
+            "# 8. BACKGROUND SYNC TO DRIVE (eval/exports on Drive only after you run cells 11–12; checkpoints sync during train if this cell ran before 10)\n"
             "import threading, time, shutil\n"
             "if 'SYNC_STOP' in globals():\n"
             "    SYNC_STOP.set()\n"
@@ -296,7 +283,7 @@ def build_notebook() -> dict:
             "print('background sync started (first tick already ran)')\n"
         ),
         code(
-            "# 10b. TensorBoard (можно запускать до или после TRAIN; во время блокирующей ячейки TRAIN новая ячейка Colab не стартует)\n"
+            "# 9. TensorBoard (можно запускать до или после TRAIN; во время блокирующей ячейки TRAIN новая ячейка Colab не стартует)\n"
             "import subprocess, sys, time, shutil\n"
             "from google.colab import output\n"
             "\n"
@@ -343,9 +330,6 @@ def build_notebook() -> dict:
             "env['PYTHONUNBUFFERED'] = '1'\n"
             "env.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')\n"
             "cmd = [sys.executable, '-u', '-m', 'scripts.train_harmonizer', '--config', str(PROJECT_ROOT / 'runtime_configs/train.yaml')]\n"
-            "resume = globals().get('resume_path')\n"
-            "if resume is not None:\n"
-            "    cmd += ['--resume', str(resume)]\n"
             "print('TRAIN CMD:', ' '.join(map(str, cmd)))\n"
             "print('Дальше: loading, train_start, epoch_begin, train_iter_begin (затем пауза до первого train_step — нормально: 1-й батч + воркеры + GPU).')\n"
             "def _stream_cmd(cmd, cwd, env):\n"

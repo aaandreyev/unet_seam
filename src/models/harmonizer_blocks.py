@@ -56,7 +56,7 @@ class NAFBlockLite(nn.Module):
 class NAFEncoderLite(nn.Module):
     def __init__(
         self,
-        in_channels: int = 5,
+        in_channels: int = 9,
         channels: tuple[int, ...] = (32, 64, 128, 192),
         blocks: tuple[int, ...] = (2, 2, 4, 6),
     ) -> None:

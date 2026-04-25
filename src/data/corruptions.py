@@ -168,7 +168,7 @@ def apply_random_corruptions(inner: torch.Tensor, generator: torch.Generator) ->
             x = _gaussian_blur(x, sigma)
         elif name == "noise":
             sigma = torch.empty(1).uniform_(0.0, 0.01, generator=generator).item()
-            x = x + torch.randn_like(x, generator=generator) * sigma
+            x = x + torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator) * sigma
         elif name == "microcontrast":
             amount = torch.empty(1).uniform_(0.0, 0.1, generator=generator).item()
             blur = _gaussian_blur(x, 1.0)

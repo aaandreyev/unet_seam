@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from src.data.strip_geometry import StripSpec
 from src.data.synthetic_strip_dataset import SyntheticStripDataset, collate_strip_batch
 from src.losses.harmonizer_losses import HarmonizerLossComputer
-from src.models.harmonizer import SeamHarmonizerV1
+from src.models.harmonizer import SeamHarmonizerV3
 from src.train.checkpoint import load_checkpoint
 from src.train.harmonizer_loop import run_harmonizer_epoch
 from src.utils.device import pick_device
@@ -47,14 +47,20 @@ def main() -> None:
     model_cfg = train_cfg.get("model") or {}
     dataset_cfg = train_cfg.get("dataset") or {}
     device = pick_device()
-    model = SeamHarmonizerV1(
+    model = SeamHarmonizerV3(
+        in_channels=int(model_cfg.get("in_channels", 9)),
         channels=tuple(model_cfg.get("channels", [32, 64, 128, 192])),
         blocks=tuple(model_cfg.get("blocks", [2, 2, 4, 6])),
-        num_knots=int(model_cfg.get("num_knots", 16)),
-        alpha=float(model_cfg.get("alpha", 0.20)),
         outer_width=int(dataset_cfg.get("outer_width", 128)),
+        boundary_band_px=int(dataset_cfg.get("boundary_band_px", 24)),
     ).to(device)
-    model.load_state_dict(ckpt["ema"])
+    try:
+        model.load_state_dict(ckpt["ema"])
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "Checkpoint EMA weights are incompatible with SeamHarmonizerV3 evaluation. "
+            "Use a v3-trained checkpoint or retrain via --load-weights first."
+        ) from exc
     model.eval()
     dataset = _build_dataset(train_cfg, eval_cfg)
     loader = DataLoader(

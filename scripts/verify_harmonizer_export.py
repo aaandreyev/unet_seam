@@ -8,19 +8,18 @@ import torch
 import yaml
 from safetensors.torch import load_file
 
-from src.models.harmonizer import SeamHarmonizerV1
+from src.models.harmonizer import SeamHarmonizerV3
 from src.train.checkpoint import load_checkpoint
 
 
-def _build_from_sidecar(sidecar: dict) -> SeamHarmonizerV1:
+def _build_from_sidecar(sidecar: dict) -> SeamHarmonizerV3:
     arch = sidecar["architecture"]
-    return SeamHarmonizerV1(
+    return SeamHarmonizerV3(
         in_channels=arch["in_channels"],
         channels=tuple(arch["channels"]),
         blocks=tuple(arch["blocks"]),
-        num_knots=arch["num_knots"],
         outer_width=sidecar["strip"]["outer_width"],
-        alpha=arch["alpha"],
+        boundary_band_px=sidecar["strip"].get("boundary_band_px", 24),
     )
 
 
@@ -31,8 +30,8 @@ def main() -> None:
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
     model_path = Path(cfg["export_root"]) / f"{cfg['model_name']}.safetensors"
     sidecar = json.loads(model_path.with_suffix(".json").read_text(encoding="utf-8"))
-    if sidecar["architecture"]["name"] != "seam_harmonizer_v1":
-        raise RuntimeError("not a SeamHarmonizerV1 export")
+    if sidecar["architecture"]["name"] != "seam_harmonizer_v3":
+        raise RuntimeError("not a SeamHarmonizerV3 export")
     exported = _build_from_sidecar(sidecar)
     exported.load_state_dict(load_file(str(model_path), device="cpu"))
     exported.eval()
@@ -41,13 +40,13 @@ def main() -> None:
     raw.load_state_dict(ckpt["ema"])
     raw.eval()
     generator = torch.Generator().manual_seed(123)
-    x = torch.rand(1, 5, 1024, 256, generator=generator)
+    x = torch.rand(1, 9, 1024, 256, generator=generator)
     with torch.inference_mode():
         a = exported(x)
         b = raw(x)
     diffs = {
         key: float((a[key] - b[key]).abs().max().item())
-        for key in ("corrected_strip", "corrected_inner", "curves", "shading_lowres")
+        for key in ("corrected_strip", "corrected_inner", "gain_lowres", "gate_lowres")
     }
     max_diff = max(diffs.values())
     if max_diff >= 1e-5:

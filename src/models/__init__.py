@@ -1,5 +1,5 @@
 """Model modules."""
 
-from src.models.harmonizer import SeamHarmonizerV1
+from src.models.harmonizer import SeamHarmonizerV3
 
-__all__ = ["SeamHarmonizerV1"]
+__all__ = ["SeamHarmonizerV3"]

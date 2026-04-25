@@ -11,14 +11,11 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from src.data.corruptions import apply_random_corruptions
+from src.data.harmonizer_input import build_harmonizer_input
 from src.data.manifest import read_jsonl
 from src.data.strip_geometry import (
     StripSpec,
-    build_decay_mask,
     canonicalize_strip,
-    make_boundary_band_mask,
-    make_distance_to_seam,
-    make_inner_mask,
 )
 
 
@@ -82,11 +79,9 @@ class SyntheticStripDataset(Dataset):
 
     def _config_for_index(self, idx: int) -> SampleConfig:
         rng = random.Random(self.seed + idx)
-        image_slot = idx // max(self.strips_per_image, 1)
         epoch_variants = self.base_variants.copy()
         rng.shuffle(epoch_variants)
         base = epoch_variants[idx % min(len(epoch_variants), self.strips_per_image) if self.strips_per_image <= len(epoch_variants) else idx % len(epoch_variants)]
-        del image_slot
         return SampleConfig(
             axis=base.axis,
             side=base.side,
@@ -151,19 +146,15 @@ class SyntheticStripDataset(Dataset):
             inner = input_rgb[..., self.spec.outer_width :]
             corrupted = apply_random_corruptions(inner, torch.Generator().manual_seed(self.seed + idx))
             input_rgb[..., self.spec.outer_width :] = corrupted.image
-        mask = make_inner_mask(self.spec.strip_height, self.spec.outer_width + cfg.inner_width, seam_x)
-        distance = make_distance_to_seam(self.spec.strip_height, self.spec.outer_width + cfg.inner_width, seam_x)
-        boundary = make_boundary_band_mask(self.spec.strip_height, self.spec.outer_width + cfg.inner_width, seam_x, self.boundary_band_px)
-        decay = build_decay_mask(self.spec.strip_height, self.spec.outer_width + cfg.inner_width, seam_x, cfg.inner_width)
+        built = build_harmonizer_input(
+            input_rgb.squeeze(0),
+            outer_width=self.spec.outer_width,
+            boundary_band_px=self.boundary_band_px,
+            seam_x=seam_x,
+        )
         sample = {
-            "input": torch.cat([input_rgb.squeeze(0), mask.squeeze(0), distance.squeeze(0)], dim=0),
+            **built,
             "target": target,
-            "input_rgb": input_rgb.squeeze(0),
-            "mask": mask.squeeze(0),
-            "distance": distance.squeeze(0),
-            "inner_region_mask": mask.squeeze(0),
-            "boundary_band_mask": boundary.squeeze(0),
-            "decay_mask": decay.squeeze(0),
             "meta": {
                 "image_id": row["id"],
                 "axis": cfg.axis,
@@ -178,6 +169,7 @@ class SyntheticStripDataset(Dataset):
                 "split": row.get("split"),
                 "cluster_id": row.get("cluster_id"),
                 "seam_x_frac_in_source": cfg.seam_x_frac,
+                "seam_x": seam_x,
             },
         }
         return sample

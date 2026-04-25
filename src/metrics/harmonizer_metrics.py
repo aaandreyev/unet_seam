@@ -27,59 +27,68 @@ def _grad_mae_mean(pred: torch.Tensor, target: torch.Tensor) -> float:
     return (dxp - dxt).abs().mean().item() + (dyp - dyt).abs().mean().item()
 
 
+def _extract_aux(outputs_or_curves, shading: torch.Tensor | None) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    if isinstance(outputs_or_curves, dict):
+        confidence = outputs_or_curves.get("confidence")
+        detail = outputs_or_curves.get("detail")
+        gain = outputs_or_curves.get("gain")
+        return confidence, detail, gain
+    return None, None, shading
+
+
 def _harmonizer_metrics_torch(
     pred_inner: torch.Tensor,
     target_inner: torch.Tensor,
     input_inner: torch.Tensor,
-    curves: torch.Tensor,
-    shading: torch.Tensor,
+    outputs_or_curves: dict[str, torch.Tensor] | torch.Tensor,
+    shading: torch.Tensor | None,
 ) -> dict[str, float]:
-    """MAE / lowfreq / gradient / curve stats on device (single sync to scalars)."""
     low_pred = gaussian_blur_tensor(pred_inner, 5.0)
     low_target = gaussian_blur_tensor(target_inner, 5.0)
-    slopes = curves[..., 1:] - curves[..., :-1]
-    return {
+    confidence, detail, gain = _extract_aux(outputs_or_curves, shading)
+    out = {
         "boundary_mae_8": _mae_band_mean(pred_inner, target_inner, 8),
         "boundary_mae_16": _mae_band_mean(pred_inner, target_inner, 16),
         "boundary_mae_32": _mae_band_mean(pred_inner, target_inner, 32),
         "baseline_boundary_mae_16": _mae_band_mean(input_inner, target_inner, 16),
         "lowfreq_mae": (low_pred - low_target).abs().mean().item(),
         "gradient_mae": _grad_mae_mean(pred_inner, target_inner),
-        "curve_max_slope": slopes.max().item(),
-        "curve_min_slope": slopes.min().item(),
-        "shading_abs_mean": shading.abs().mean().item(),
     }
+    if confidence is not None:
+        out["confidence_mean"] = confidence.mean().item()
+    if detail is not None:
+        out["detail_abs_mean"] = detail.abs().mean().item()
+    if gain is not None:
+        out["gain_abs_log_mean"] = gain.clamp_min(1e-6).log().abs().mean().item()
+    return out
 
 
 def evaluate_harmonizer_batch_fast(
     corrected_strip: torch.Tensor,
     input_rgb: torch.Tensor,
     target: torch.Tensor,
-    curves: torch.Tensor,
-    shading: torch.Tensor,
+    outputs_or_curves: dict[str, torch.Tensor] | torch.Tensor,
+    shading: torch.Tensor | None = None,
     outer_width: int = 128,
 ) -> dict[str, float]:
-    """GPU-only train metrics: MAE bands, lowfreq, gradients, no CIEDE (no CPU/skimage)."""
     pred_inner = _inner(corrected_strip, outer_width)
     target_inner = _inner(target, outer_width)
     input_inner = _inner(input_rgb, outer_width)
-    return _harmonizer_metrics_torch(pred_inner, target_inner, input_inner, curves, shading)
+    return _harmonizer_metrics_torch(pred_inner, target_inner, input_inner, outputs_or_curves, shading)
 
 
 def evaluate_harmonizer_batch(
     corrected_strip: torch.Tensor,
     input_rgb: torch.Tensor,
     target: torch.Tensor,
-    curves: torch.Tensor,
-    shading: torch.Tensor,
+    outputs_or_curves: dict[str, torch.Tensor] | torch.Tensor,
+    shading: torch.Tensor | None = None,
     outer_width: int = 128,
 ) -> dict[str, float]:
     pred_inner = _inner(corrected_strip, outer_width)
     target_inner = _inner(target, outer_width)
     input_inner = _inner(input_rgb, outer_width)
-    out = _harmonizer_metrics_torch(pred_inner, target_inner, input_inner, curves, shading)
-
-    # CIEDE on CPU (val / eval) — only path that needs numpy+skimage
+    out = _harmonizer_metrics_torch(pred_inner, target_inner, input_inner, outputs_or_curves, shading)
     pred_np = _to_numpy(pred_inner)
     target_np = _to_numpy(target_inner)
     input_np = _to_numpy(input_inner)

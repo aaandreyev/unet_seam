@@ -11,23 +11,23 @@ dataset:
   seam_jitter_px: 0
   boundary_band_px: 24
 model:
-  architecture: seam_harmonizer_v1
+  architecture: seam_harmonizer_v3
+  in_channels: 9
   channels: [32, 64, 128, 192]
   blocks: [2, 2, 4, 6]
-  num_knots: 16
-  alpha: 0.20
 loss:
-  seam_tau: 12.0
   low_sigma: 5.0
   weights:
     rec: 1.0
-    seam: 2.0
-    low: 0.75
-    grad: 0.25
-    curve_smooth: 0.02
-    curve_id: 0.01
-    tv: 0.02
-    mean: 0.01
+    seam: 1.25
+    low: 1.0
+    grad: 0.4
+    chroma: 0.35
+    stats: 0.2
+    gate: 0.02
+    field: 0.05
+    detail: 0.05
+    matrix: 0.05
 train:
   seed: 43
   lr: 1.0e-4
