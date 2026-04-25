@@ -166,9 +166,6 @@ def main() -> None:
         start_epoch = int(state["epoch"]) + 1
         best_quality = _quality(((state.get("metrics") or {}).get("val") or {}))
         print(json.dumps({"event": "resumed", "start_epoch": start_epoch}, ensure_ascii=False), flush=True)
-    if device.type == "cuda":
-        # compile after EMA/checkpoint so deepcopy and state_dict loading happen on the plain model
-        model = torch.compile(model, mode="max-autotune-no-cudagraphs")
     loss_cfg = cfg.get("loss") or {}
     loss_computer = HarmonizerLossComputer(
         outer_width=int(cfg["dataset"].get("outer_width", 128)),
