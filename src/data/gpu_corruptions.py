@@ -139,6 +139,7 @@ class GPUCorruption(nn.Module):
 
         # Additive Gaussian noise
         noise_std = r(0.0, 0.025) * m_d
-        x = (x + torch.randn_like(x) * noise_std).clamp(0, 1)
+        noise = torch.randn(B, C, H, W, device=dev, generator=gen)
+        x = (x + noise * noise_std).clamp(0, 1)
 
         return x

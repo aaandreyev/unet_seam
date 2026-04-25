@@ -67,7 +67,13 @@ def run_harmonizer_epoch(
             inner = clean_strip[:, :, :, outer_width:]
             corrupted_inner = gpu_corruption(inner)
             corrupted_strip = torch.cat([clean_strip[:, :, :, :outer_width], corrupted_inner], dim=-1)
-            batch = {**batch, "input": torch.cat([corrupted_strip, batch["input"][:, 3:]], dim=1)}
+            batch = {
+                **batch,
+                "input": torch.cat([corrupted_strip, batch["input"][:, 3:]], dim=1),
+                "input_rgb": corrupted_strip,  # baseline metrics must see the corrupted input
+            }
+        if device.type == "cuda" and "input" in batch:
+            batch = {**batch, "input": batch["input"].to(memory_format=torch.channels_last)}
         ctx = torch.inference_mode() if not train_mode else contextlib.nullcontext()
         with ctx:
             if amp_ctx_factory is not None:
