@@ -14,8 +14,12 @@ class EMA:
 
     @torch.no_grad()
     def update(self, model: torch.nn.Module) -> None:
+        # torch.compile wraps the model in OptimizedModule (_orig_mod attribute).
+        # state_dict() on a compiled model returns '_orig_mod.*' prefixed keys.
+        # Always update from the underlying raw module so keys match the EMA copy.
+        source = getattr(model, "_orig_mod", model)
         ema_state = self.model.state_dict()
-        for key, value in model.state_dict().items():
+        for key, value in source.state_dict().items():
             ema_state[key].mul_(self.decay).add_(value.detach(), alpha=1.0 - self.decay)
 
     def state_dict(self) -> dict:

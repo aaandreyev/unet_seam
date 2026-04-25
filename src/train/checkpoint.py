@@ -85,8 +85,10 @@ def save_training_checkpoint(
     config: dict,
     metrics: dict,
 ) -> None:
+    # torch.compile wraps the model; always save the raw module's state dict.
+    raw_model = getattr(model, "_orig_mod", model)
     payload = {
-        "model": model.state_dict(),
+        "model": raw_model.state_dict(),
         "ema": ema_state,
         "optimizer": optimizer.state_dict(),
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
