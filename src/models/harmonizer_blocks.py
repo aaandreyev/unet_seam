@@ -8,14 +8,16 @@ import torch.nn.functional as F
 class LayerNorm2d(nn.Module):
     def __init__(self, channels: int, eps: float = 1e-6) -> None:
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(1, channels, 1, 1))
-        self.bias = nn.Parameter(torch.zeros(1, channels, 1, 1))
+        self.weight = nn.Parameter(torch.ones(channels))
+        self.bias = nn.Parameter(torch.zeros(channels))
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         mean = x.mean(dim=1, keepdim=True)
         var = (x - mean).pow(2).mean(dim=1, keepdim=True)
-        return (x - mean) * torch.rsqrt(var + self.eps) * self.weight + self.bias
+        w = self.weight.view(1, -1, 1, 1)
+        b = self.bias.view(1, -1, 1, 1)
+        return (x - mean) * torch.rsqrt(var + self.eps) * w + b
 
 
 class SimpleGate(nn.Module):
@@ -33,24 +35,24 @@ class NAFBlockLite(nn.Module):
         self.dw = nn.Conv2d(hidden * 2, hidden * 2, kernel_size=3, padding=1, groups=hidden * 2)
         self.gate = SimpleGate()
         self.pw2 = nn.Conv2d(hidden, channels, kernel_size=1)
-        self.beta = nn.Parameter(torch.zeros(1, channels, 1, 1))
+        self.beta = nn.Parameter(torch.zeros(channels))
 
         self.norm2 = LayerNorm2d(channels)
         self.ffn1 = nn.Conv2d(channels, hidden * 2, kernel_size=1)
         self.ffn_gate = SimpleGate()
         self.ffn2 = nn.Conv2d(hidden, channels, kernel_size=1)
-        self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
+        self.gamma = nn.Parameter(torch.zeros(channels))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = self.pw1(self.norm1(x))
         y = self.dw(y)
         y = self.gate(y)
         y = self.pw2(y)
-        x = x + y * self.beta
+        x = x + y * self.beta.view(1, -1, 1, 1)
         y = self.ffn1(self.norm2(x))
         y = self.ffn_gate(y)
         y = self.ffn2(y)
-        return x + y * self.gamma
+        return x + y * self.gamma.view(1, -1, 1, 1)
 
 
 class NAFEncoderLite(nn.Module):
