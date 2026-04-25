@@ -1,1 +1,1 @@
-"""Seam residual corrector package."""
+"""Seam harmonizer package."""

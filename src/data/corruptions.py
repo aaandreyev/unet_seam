@@ -8,12 +8,10 @@ import torch.nn.functional as F
 
 
 GROUPS = {
-    "A": ["brightness", "exposure", "gain"],
-    "B": ["contrast", "gamma"],
-    "C": ["temperature", "tint", "channel_gains", "saturation"],
-    "D": ["shadow", "highlight", "midtone"],
-    "E": ["brightness_gradient", "color_gradient", "illumination_poly", "vignette"],
-    "F": ["blur", "jpeg_like", "noise", "microcontrast"],
+    "A": ["exposure", "brightness", "contrast", "gamma", "saturation", "hue", "temperature", "tint", "channel_gains", "black_point", "white_point"],
+    "B": ["shadow_lift", "shadow_crush", "highlight_compress", "highlight_boost", "midtone", "s_curve", "reverse_s_curve"],
+    "C": ["horizontal_luma_gradient", "vertical_luma_gradient", "illumination_field", "temperature_field", "saturation_field"],
+    "D": ["blur", "microcontrast", "noise", "jpeg_like"],
 }
 
 
@@ -64,41 +62,31 @@ def _field(shape: torch.Size, magnitude: float, generator: torch.Generator) -> t
     return ax * xx + ay * yy
 
 
+def _maybe_add(chosen: list[str], group: list[str], probability: float, generator: torch.Generator) -> None:
+    if torch.rand(1, generator=generator).item() < probability:
+        name = group[int(torch.randint(0, len(group), (1,), generator=generator).item())]
+        if name not in chosen:
+            chosen.append(name)
+
+
+def _pick_unique(pool: list[str], chosen: list[str], generator: torch.Generator) -> str:
+    while True:
+        name = pool[int(torch.randint(0, len(pool), (1,), generator=generator).item())]
+        if name not in chosen:
+            return name
+
+
 def apply_random_corruptions(inner: torch.Tensor, generator: torch.Generator) -> CorruptionResult:
     x = inner.clone()
     ops: list[str] = []
-    candidates = [
-        "brightness",
-        "exposure",
-        "gain",
-        "contrast",
-        "gamma",
-        "temperature",
-        "tint",
-        "channel_gains",
-        "saturation",
-        "shadow",
-        "highlight",
-        "midtone",
-        "brightness_gradient",
-        "color_gradient",
-        "illumination_poly",
-        "vignette",
-        "blur",
-        "noise",
-        "microcontrast",
-    ]
     n_ops = int(torch.multinomial(torch.tensor([0.2, 0.4, 0.3, 0.1]), 1, generator=generator).item()) + 2
-    chosen: list[str] = []
+    chosen = [_pick_unique(GROUPS["A"] + GROUPS["B"], [], generator)]
+    _maybe_add(chosen, GROUPS["C"], 0.35, generator)
+    _maybe_add(chosen, GROUPS["D"], 0.25, generator)
+    candidates = GROUPS["A"] + GROUPS["B"]
     while len(chosen) < n_ops:
-        idx = int(torch.randint(0, len(candidates), (1,), generator=generator).item())
-        name = candidates[idx]
-        if name not in chosen:
-            chosen.append(name)
-    if not any(name in GROUPS["A"] + GROUPS["B"] + GROUPS["C"] for name in chosen):
-        chosen[0] = "exposure"
-    if not any(name in GROUPS["D"] for name in chosen):
-        chosen[min(1, len(chosen) - 1)] = "midtone"
+        chosen.append(_pick_unique(candidates, chosen, generator))
+    chosen = chosen[:n_ops]
     for name in chosen:
         if name == "brightness":
             delta = torch.empty(1).uniform_(-0.08, 0.08, generator=generator).item()
@@ -106,9 +94,6 @@ def apply_random_corruptions(inner: torch.Tensor, generator: torch.Generator) ->
         elif name == "exposure":
             ev = torch.empty(1).uniform_(-0.3, 0.5, generator=generator).item()
             x = x * (2.0**ev)
-        elif name == "gain":
-            gain = torch.empty(1).uniform_(0.85, 1.2, generator=generator).item()
-            x = x * gain
         elif name == "contrast":
             contrast = torch.empty(1).uniform_(0.8, 1.25, generator=generator).item()
             mean = x.mean(dim=(-2, -1), keepdim=True)
@@ -116,6 +101,15 @@ def apply_random_corruptions(inner: torch.Tensor, generator: torch.Generator) ->
         elif name == "gamma":
             gamma = torch.empty(1).uniform_(0.85, 1.2, generator=generator).item()
             x = _apply_gamma(x, gamma)
+        elif name == "saturation":
+            sat = torch.empty(1).uniform_(0.75, 1.35, generator=generator).item()
+            luma = _rgb_to_luma(x)
+            x = luma + (x - luma) * sat
+        elif name == "hue":
+            angle = torch.empty(1).uniform_(-0.08, 0.08, generator=generator).item()
+            luma = _rgb_to_luma(x)
+            centered = x - luma
+            x = luma + centered.roll(shifts=1, dims=1) * angle + centered * (1.0 - abs(angle))
         elif name == "temperature":
             t = torch.empty(1).uniform_(-0.06, 0.06, generator=generator).item()
             x[:, 0:1] += t
@@ -126,35 +120,49 @@ def apply_random_corruptions(inner: torch.Tensor, generator: torch.Generator) ->
         elif name == "channel_gains":
             gains = torch.empty((1, 3, 1, 1)).uniform_(0.9, 1.1, generator=generator)
             x = x * gains
-        elif name == "saturation":
-            sat = torch.empty(1).uniform_(0.75, 1.35, generator=generator).item()
-            luma = _rgb_to_luma(x)
-            x = luma + (x - luma) * sat
-        elif name == "shadow":
+        elif name == "black_point":
+            black = torch.empty(1).uniform_(-0.04, 0.06, generator=generator).item()
+            x = (x - black) / max(1.0 - black, 1e-3)
+        elif name == "white_point":
+            white = torch.empty(1).uniform_(0.92, 1.08, generator=generator).item()
+            x = x / max(white, 1e-3)
+        elif name == "shadow_lift":
             amount = torch.empty(1).uniform_(0.0, 0.12, generator=generator).item()
             x = x + (1.0 - x) * amount * (1.0 - x).pow(2)
-        elif name == "highlight":
+        elif name == "shadow_crush":
+            amount = torch.empty(1).uniform_(0.0, 0.16, generator=generator).item()
+            x = x - amount * (1.0 - x).pow(2)
+        elif name == "highlight_compress":
             amount = torch.empty(1).uniform_(0.0, 0.12, generator=generator).item()
             x = x - amount * x.pow(2)
+        elif name == "highlight_boost":
+            amount = torch.empty(1).uniform_(0.0, 0.12, generator=generator).item()
+            x = x + amount * x.pow(2)
         elif name == "midtone":
             amount = torch.empty(1).uniform_(-0.08, 0.08, generator=generator).item()
             x = x + amount * torch.sin(x * math.pi)
-        elif name == "brightness_gradient":
-            x = x + _field(x.shape, 0.12, generator)
-        elif name == "color_gradient":
-            field = _field(x.shape, 0.12, generator)
+        elif name == "s_curve":
+            amount = torch.empty(1).uniform_(0.10, 0.30, generator=generator).item()
+            x = x + amount * (x - 0.5) * (1.0 - (2.0 * x - 1.0).abs())
+        elif name == "reverse_s_curve":
+            amount = torch.empty(1).uniform_(0.10, 0.30, generator=generator).item()
+            x = x - amount * (x - 0.5) * (1.0 - (2.0 * x - 1.0).abs())
+        elif name == "horizontal_luma_gradient":
+            xx = torch.linspace(-1.0, 1.0, x.shape[-1], device=x.device, dtype=x.dtype).view(1, 1, 1, x.shape[-1])
+            x = x + xx * torch.empty(1).uniform_(-0.12, 0.12, generator=generator).item()
+        elif name == "vertical_luma_gradient":
+            yy = torch.linspace(-1.0, 1.0, x.shape[-2], device=x.device, dtype=x.dtype).view(1, 1, x.shape[-2], 1)
+            x = x + yy * torch.empty(1).uniform_(-0.12, 0.12, generator=generator).item()
+        elif name == "illumination_field":
+            x = x * (1.0 + _field(x.shape, 0.10, generator).to(device=x.device, dtype=x.dtype))
+        elif name == "temperature_field":
+            field = _field(x.shape, 0.10, generator).to(device=x.device, dtype=x.dtype)
             x[:, 0:1] += field
             x[:, 2:3] -= field * 0.8
-        elif name == "illumination_poly":
-            field = _field(x.shape, 0.10, generator)
-            x = x * (1.0 + field)
-        elif name == "vignette":
-            _, _, h, w = x.shape
-            yy = torch.linspace(-1.0, 1.0, h).view(1, 1, h, 1)
-            xx = torch.linspace(-1.0, 1.0, w).view(1, 1, 1, w)
-            rr = (xx * xx + yy * yy).sqrt()
-            scale = torch.empty(1).uniform_(0.0, 0.15, generator=generator).item()
-            x = x * (1.0 - rr * scale)
+        elif name == "saturation_field":
+            field = _field(x.shape, 0.20, generator).to(device=x.device, dtype=x.dtype)
+            luma = _rgb_to_luma(x)
+            x = luma + (x - luma) * (1.0 + field).clamp(0.7, 1.3)
         elif name == "blur":
             sigma = torch.empty(1).uniform_(0.0, 1.5, generator=generator).item()
             x = _gaussian_blur(x, sigma)
@@ -165,5 +173,8 @@ def apply_random_corruptions(inner: torch.Tensor, generator: torch.Generator) ->
             amount = torch.empty(1).uniform_(0.0, 0.1, generator=generator).item()
             blur = _gaussian_blur(x, 1.0)
             x = x + (x - blur) * amount
+        elif name == "jpeg_like":
+            levels = int(torch.randint(64, 160, (1,), generator=generator).item())
+            x = torch.round(x.clamp(0.0, 1.0) * float(levels)) / float(levels)
         ops.append(name)
     return CorruptionResult(x.clamp(0.0, 1.0), ops)

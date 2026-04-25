@@ -1,0 +1,25 @@
+model:
+  name: seam_harmonizer_v1
+  architecture: seam_harmonizer_v1
+  in_channels: 5
+  channels: [32, 64, 128, 192]
+  blocks: [2, 2, 4, 6]
+  num_knots: 16
+  alpha: 0.20
+strip:
+  height: 1024
+  width: 256
+  outer_width: 128
+  inner_width: 128
+loss:
+  seam_tau: 12.0
+  low_sigma: 5.0
+  weights:
+    rec: 1.0
+    seam: 2.0
+    low: 0.75
+    grad: 0.25
+    curve_smooth: 0.02
+    curve_id: 0.01
+    tv: 0.02
+    mean: 0.01

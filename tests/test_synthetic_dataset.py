@@ -28,3 +28,19 @@ def test_dataset_shapes(tmp_path: Path):
     assert sample["input"].shape[0] == 5
     assert sample["target"].shape[0] == 3
     assert sample["mask"].shape[0] == 1
+
+
+def test_dataset_resolves_relative_manifest_paths(tmp_path: Path):
+    root = tmp_path / "bundle"
+    image_dir = root / "data/source_images"
+    manifest_dir = root / "manifests"
+    image_dir.mkdir(parents=True)
+    manifest_dir.mkdir(parents=True)
+    img = (np.random.rand(1024, 1024, 3) * 255).astype("uint8")
+    Image.fromarray(img).save(image_dir / "000000.png")
+    write_jsonl(
+        manifest_dir / "input_raw_manifest.jsonl",
+        [{"id": "000000", "source_path": "data/source_images/000000.png", "split": "train"}],
+    )
+    dataset = SyntheticStripDataset(manifest_dir / "input_raw_manifest.jsonl", strips_per_image=1, split="train", inner_widths=[128])
+    assert dataset[0]["input"].shape == (5, 1024, 256)

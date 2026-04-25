@@ -1,7 +1,0 @@
-checkpoint: outputs/checkpoints/best_boundary_ciede2000.pt
-report_root: outputs/eval_reports
-batch_size: 8
-bootstrap_samples: 200
-primary_metric: boundary_ciede2000
-cache_root: outputs/strip_cache
-val_cache_manifest: manifests/strip_val_cache.jsonl

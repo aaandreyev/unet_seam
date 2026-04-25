@@ -12,7 +12,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", default="manifests/input_raw_manifest.jsonl")
     parser.add_argument("--count", type=int, default=8)
-    parser.add_argument("--out", default="outputs/strip_cache/preview")
+    parser.add_argument("--out", default="outputs/synthetic_preview")
     args = parser.parse_args()
     dataset = SyntheticStripDataset(Path(args.manifest), strips_per_image=max(args.count, 1))
     out_dir = Path(args.out)

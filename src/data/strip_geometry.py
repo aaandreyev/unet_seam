@@ -54,8 +54,9 @@ def make_inner_mask(height: int, width: int, seam_x: int) -> torch.Tensor:
 
 def make_distance_to_seam(height: int, width: int, seam_x: int) -> torch.Tensor:
     xs = torch.arange(width, dtype=torch.float32).view(1, 1, 1, width)
-    max_distance = max(seam_x, width - seam_x)
-    return (xs.sub(float(seam_x)).abs() / float(max_distance)).expand(1, 1, height, width)
+    inner_width = max(width - seam_x, 1)
+    distance = ((xs - float(seam_x)).clamp(min=0.0) / float(max(inner_width - 1, 1))).clamp(0.0, 1.0)
+    return distance.expand(1, 1, height, width)
 
 
 def make_boundary_band_mask(height: int, width: int, seam_x: int, band_px: int = 24) -> torch.Tensor:
@@ -124,7 +125,12 @@ def extract_side_strip(
         strip = canonicalize_strip(strip, "bottom")
     else:
         raise ValueError(f"unsupported side: {side}")
-    return strip, {"edge_padded_pixels": int(edge_padded)}
+    meta = {"edge_padded_pixels": int(edge_padded)}
+    if side in {"left", "right"}:
+        meta["y_start"] = int(y_start)
+    else:
+        meta["x_start"] = int(x_start)
+    return strip, meta
 
 
 def validate_roundtrip(strip: torch.Tensor, side: Side) -> bool:

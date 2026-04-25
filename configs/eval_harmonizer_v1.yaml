@@ -1,0 +1,7 @@
+checkpoint: outputs/checkpoints/best_harmonizer_quality.pt
+report_root: outputs/eval_reports_harmonizer
+batch_size: 32
+bootstrap_samples: 200
+primary_metric: boundary_ciede2000_16
+source_manifest: manifests/input_raw_manifest.jsonl
+strips_per_image: 1

@@ -7,19 +7,23 @@ from pathlib import Path
 import torch
 from PIL import Image
 
-from comfy_node.model_loader import load_model
-from comfy_node.strip_ops import mask_bbox, rectangularity
+try:
+    from .model_loader import load_model
+    from .strip_ops import mask_bbox, rectangularity
+except ImportError:
+    from model_loader import load_model
+    from strip_ops import mask_bbox, rectangularity
 from src.infer.correct_full_frame import apply_corrector_to_full_frame
 
 
-class SeamResidualCorrectorNode:
+class SeamHarmonizerV1Node:
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "IMAGE": ("IMAGE",),
                 "MASK": ("MASK",),
-                "model_path": ("STRING", {"default": "outputs/exports/seam_residual_corrector_v1.safetensors"}),
+                "model_path": ("STRING", {"default": "outputs/exports/seam_harmonizer_v1.safetensors"}),
                 "inner_width": ("INT", {"default": 128}),
                 "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
                 "process_left": ("BOOLEAN", {"default": True}),
@@ -69,14 +73,24 @@ class SeamResidualCorrectorNode:
         root.mkdir(parents=True, exist_ok=True)
         self._save_tensor(image[0], root / "input.png")
         self._save_tensor(corrected[0], root / "corrected.png")
-        merged = debug.get("merged_residual")
+        merged = debug.get("merged_delta")
         if merged is not None:
-            self._save_tensor((merged[0] + 0.5).clamp(0.0, 1.0), root / "merged_residual.png")
-        for side, residual in debug.get("side_residuals", {}).items():
-            self._save_tensor((residual[0] + 0.5).clamp(0.0, 1.0), root / f"side_{side}_residual.png")
+            self._save_tensor((merged[0] + 0.5).clamp(0.0, 1.0), root / "merged_delta.png")
+        for side, delta in debug.get("side_deltas", {}).items():
+            self._save_tensor((delta[0] + 0.5).clamp(0.0, 1.0), root / f"side_{side}_delta.png")
         for side, weight in debug.get("weights", {}).items():
             self._save_tensor(weight[0].repeat(3, 1, 1), root / f"weight_map_{side}.png")
-        (root / "summary.json").write_text(json.dumps({"per_side": debug.get("per_side", {})}, indent=2), encoding="utf-8")
+        shading = debug.get("shading_lowres")
+        if isinstance(shading, torch.Tensor):
+            for i in range(min(shading.shape[0], 4)):
+                preview = shading[i].repeat(3, 1, 1)
+                preview = (preview - preview.min()) / (preview.max() - preview.min()).clamp_min(1e-6)
+                self._save_tensor(preview, root / f"shading_lowres_{i}.png")
+        curves = debug.get("curves")
+        summary = {"per_side": debug.get("per_side", {})}
+        if isinstance(curves, torch.Tensor):
+            summary["curves"] = curves.tolist()
+        (root / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     @staticmethod
     def _save_tensor(x: torch.Tensor, path: Path) -> None:

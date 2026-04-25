@@ -1,5 +1,5 @@
 from __future__ import annotations
-"""Regenerates colab/seam_residual_corrector_train_eval_colab.ipynb.
+"""Regenerates colab/seam_harmonizer_train_eval_colab.ipynb.
 
 The checked-in notebook is maintained to match this builder; re-run
 `python scripts/build_colab_training_notebook.py` only when you update
@@ -11,7 +11,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / "colab" / "seam_residual_corrector_train_eval_colab.ipynb"
+OUT = ROOT / "colab" / "seam_harmonizer_train_eval_colab.ipynb"
 
 def md(text: str) -> dict:
     return {"cell_type": "markdown", "metadata": {}, "source": text}
@@ -24,8 +24,8 @@ def code(text: str) -> dict:
 def build_notebook() -> dict:
     cells = [
         md(
-            "# Seam Residual Corrector v1 Colab Notebook\n\n"
-            "Готовый ноутбук для **training -> validation -> eval -> export -> verify_export**.\n\n"
+            "# Seam Harmonizer v1 Colab Notebook\n\n"
+            "Готовый ноутбук для **training -> validation -> eval -> export -> verify reload**.\n\n"
             "Локально нужно заранее собрать training bundle через `scripts/build_final_training_bundle.py`, "
             "загрузить `.tar.gz` на Google Drive и указать путь в параметрах ниже."
         ),
@@ -33,9 +33,9 @@ def build_notebook() -> dict:
             "# 0. PARAMS\n"
             "from pathlib import Path\n"
             "import os\n\n"
-            "DATASET_BUNDLE_DRIVE_PATH = '/content/drive/MyDrive/unet_seam/seam_residual_corrector_training_bundle.tar.gz'\n"
+            "DATASET_BUNDLE_DRIVE_PATH = '/content/drive/MyDrive/unet_seam/seam_harmonizer_training_bundle.tar.gz'\n"
             "DRIVE_RUNS_DIR = '/content/drive/MyDrive/unet_seam_runs'\n"
-            "RUN_NAME = 'seam_residual_corrector_v1_run001'\n"
+            "RUN_NAME = 'seam_harmonizer_v1_run001'\n"
             "REPO_CLONE_URL = 'https://github.com/aaandreyev/unet_seam.git'\n"
             "REPO_CLONE_REF = 'main'\n"
             "RUNTIME_ZIP_URL = ''\n"
@@ -43,13 +43,13 @@ def build_notebook() -> dict:
             "RAMDISK_SIZE_GB = 48\n"
             "COPY_ARCHIVE_TO_RAM_FIRST = True\n"
             "SYNC_INTERVAL_SEC = 180\n"
-            "# 1024x256 strips + LPIPS are heavy; 16 is the safe Colab default. The train script will auto-reduce unsafe larger values.\n"
-            "TRAIN_BATCH_SIZE = 16\n"
-            "VAL_BATCH_SIZE = 8\n"
+            "# 96GB GPU target from spec starts at batch=64; lower this if your Colab GPU is smaller.\n"
+            "TRAIN_BATCH_SIZE = 64\n"
+            "VAL_BATCH_SIZE = 64\n"
             "TRAIN_EPOCHS = 20\n"
             "# Colab VMs vary; too many workers often stalls Drive/RAM-backed datasets.\n"
             "TRAIN_NUM_WORKERS = min(4, os.cpu_count() or 2)\n"
-            "PRIMARY_CHECKPOINT = 'best_boundary_ciede2000.pt'\n"
+            "PRIMARY_CHECKPOINT = 'best_harmonizer_quality.pt'\n"
             "PROJECT_ROOT = Path('/content/seam_runtime')\n"
             "LOCAL_OUTPUTS = PROJECT_ROOT / 'outputs'\n"
             "LOCAL_CHECKPOINTS = LOCAL_OUTPUTS / 'checkpoints'\n"
@@ -216,17 +216,13 @@ def build_notebook() -> dict:
             "# 6. VALIDATE BUNDLE LAYOUT\n"
             "import json\n"
             "required = [\n"
-            "    DATA_ROOT / 'manifests/strip_train_cache.jsonl',\n"
-            "    DATA_ROOT / 'manifests/strip_val_cache.jsonl',\n"
-            "    DATA_ROOT / 'outputs/strip_cache/train',\n"
-            "    DATA_ROOT / 'outputs/strip_cache/val',\n"
+            "    DATA_ROOT / 'manifests/input_raw_manifest.jsonl',\n"
             "]\n"
             "for p in required:\n"
             "    if not p.exists():\n"
             "        raise FileNotFoundError(p)\n"
             "print(json.dumps({\n"
-            "    'train_cache_dirs': len([p for p in (DATA_ROOT / 'outputs/strip_cache/train').iterdir() if p.is_dir()]),\n"
-            "    'val_cache_dirs': len([p for p in (DATA_ROOT / 'outputs/strip_cache/val').iterdir() if p.is_dir()]),\n"
+            "    'source_manifest': str(DATA_ROOT / 'manifests/input_raw_manifest.jsonl'),\n"
             "}, ensure_ascii=False))\n"
         ),
         code(
@@ -346,7 +342,7 @@ def build_notebook() -> dict:
             "env['PYTHONPATH'] = str(PROJECT_ROOT)\n"
             "env['PYTHONUNBUFFERED'] = '1'\n"
             "env.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')\n"
-            "cmd = [sys.executable, '-u', '-m', 'scripts.train_resunet', '--config', str(PROJECT_ROOT / 'runtime_configs/train.yaml')]\n"
+            "cmd = [sys.executable, '-u', '-m', 'scripts.train_harmonizer', '--config', str(PROJECT_ROOT / 'runtime_configs/train.yaml')]\n"
             "resume = globals().get('resume_path')\n"
             "if resume is not None:\n"
             "    cmd += ['--resume', str(resume)]\n"
@@ -393,7 +389,7 @@ def build_notebook() -> dict:
             "env = os.environ.copy()\n"
             "env['PYTHONPATH'] = str(PROJECT_ROOT)\n"
             "env['PYTHONUNBUFFERED'] = '1'\n"
-            "cmd = [sys.executable, '-u', '-m', 'scripts.run_eval', '--config', str(PROJECT_ROOT / 'runtime_configs/eval.yaml')]\n"
+            "cmd = [sys.executable, '-u', '-m', 'scripts.run_eval_harmonizer', '--config', str(PROJECT_ROOT / 'runtime_configs/eval.yaml')]\n"
             "print('EVAL CMD:', ' '.join(map(str, cmd)))\n"
             "_stream_cmd(cmd, str(PROJECT_ROOT), env)\n"
         ),
@@ -420,8 +416,8 @@ def build_notebook() -> dict:
             "env = os.environ.copy()\n"
             "env['PYTHONPATH'] = str(PROJECT_ROOT)\n"
             "env['PYTHONUNBUFFERED'] = '1'\n"
-            "export_cmd = [sys.executable, '-u', '-m', 'scripts.export_safetensors', '--config', str(PROJECT_ROOT / 'runtime_configs/export.yaml')]\n"
-            "verify_cmd = [sys.executable, '-u', '-m', 'scripts.verify_export', '--config', str(PROJECT_ROOT / 'runtime_configs/export.yaml')]\n"
+            "export_cmd = [sys.executable, '-u', '-m', 'scripts.export_harmonizer_safetensors', '--config', str(PROJECT_ROOT / 'runtime_configs/export.yaml')]\n"
+            "verify_cmd = [sys.executable, '-u', '-m', 'scripts.verify_harmonizer_export', '--config', str(PROJECT_ROOT / 'runtime_configs/export.yaml')]\n"
             "print('EXPORT CMD:', ' '.join(map(str, export_cmd)))\n"
             "_stream_cmd(export_cmd, str(PROJECT_ROOT), env)\n"
             "print('VERIFY CMD:', ' '.join(map(str, verify_cmd)))\n"

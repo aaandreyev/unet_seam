@@ -42,13 +42,15 @@ class SyntheticStripDataset(Dataset):
         seed: int = 42,
         spec: StripSpec | None = None,
         boundary_band_px: int = 24,
+        inner_widths: list[int] | None = None,
     ) -> None:
+        self.manifest_root = manifest_path.parent.parent
         self.rows = [row for row in read_jsonl(manifest_path) if not split or row.get("split") == split]
         self.strips_per_image = strips_per_image
         self.seed = seed
         self.spec = spec or StripSpec()
         self.boundary_band_px = boundary_band_px
-        self.inner_widths = [96, 128, 160, 192]
+        self.inner_widths = inner_widths or [96, 128, 160, 192]
         self.base_variants = self._build_base_variants()
 
     def _build_base_variants(self) -> list[SampleConfig]:
@@ -94,7 +96,10 @@ class SyntheticStripDataset(Dataset):
         )
 
     def _load_image(self, row: dict) -> torch.Tensor:
-        arr = np.asarray(Image.open(row["source_path"]).convert("RGB"), dtype=np.float32) / 255.0
+        source_path = Path(row["source_path"])
+        if not source_path.is_absolute():
+            source_path = self.manifest_root / source_path
+        arr = np.asarray(Image.open(source_path).convert("RGB"), dtype=np.float32) / 255.0
         return torch.from_numpy(arr).permute(2, 0, 1)
 
     def _augment_source_image(self, image: torch.Tensor, cfg: SampleConfig) -> torch.Tensor:
