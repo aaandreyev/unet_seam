@@ -18,6 +18,18 @@ from src.metrics.seam_metrics import evaluate_batch
 from src.train.ema import EMA
 
 
+def _cuda_mem(device: torch.device) -> dict[str, float]:
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return {}
+    free, total = torch.cuda.mem_get_info(device)
+    return {
+        "cuda_free_gb": round(free / (1024**3), 2),
+        "cuda_allocated_gb": round(torch.cuda.memory_allocated(device) / (1024**3), 2),
+        "cuda_reserved_gb": round(torch.cuda.memory_reserved(device) / (1024**3), 2),
+        "cuda_peak_allocated_gb": round(torch.cuda.max_memory_allocated(device) / (1024**3), 2),
+    }
+
+
 @dataclass
 class EpochResult:
     losses: dict[str, float]
@@ -81,6 +93,7 @@ def run_epoch(
         }
         if wall_t0 is not None:
             vpre["sec_since_train_start"] = int(time.perf_counter() - wall_t0)
+        vpre.update(_cuda_mem(device))
         print(json.dumps(vpre, ensure_ascii=False), flush=True)
     if train_mode and console_log_interval > 0 and n_batches is not None:
         tpre: dict[str, Any] = {
@@ -91,6 +104,7 @@ def run_epoch(
         }
         if wall_t0 is not None:
             tpre["sec_since_train_start"] = int(time.perf_counter() - wall_t0)
+        tpre.update(_cuda_mem(device))
         print(json.dumps(tpre, ensure_ascii=False), flush=True)
     _amp_device_types = frozenset({"cuda", "cpu", "mps", "hpu", "xpu", "mtia"})
     for batch in progress:
@@ -203,6 +217,7 @@ def run_epoch(
                     "progress_in_epoch": round(100.0 * steps / n_batches, 1) if n_batches and n_batches > 0 else None,
                     "loss_total": round(agg_losses.get("total", 0.0) / steps, 6),
                     "b_ciede": round(agg_metrics.get("boundary_ciede2000", 0.0) / steps, 4),
+                    **_cuda_mem(device),
                 }
                 if wall_t0 is not None:
                     out["sec_since_train_start"] = int(time.perf_counter() - wall_t0)

@@ -31,6 +31,18 @@ from src.utils.device import amp_enabled, pick_device
 from src.utils.seed import seed_everything, worker_init_fn
 
 
+def _cuda_mem() -> dict[str, float]:
+    if not torch.cuda.is_available():
+        return {}
+    free, total = torch.cuda.mem_get_info()
+    return {
+        "cuda_total_gb": round(total / (1024**3), 2),
+        "cuda_free_gb": round(free / (1024**3), 2),
+        "cuda_allocated_gb": round(torch.cuda.memory_allocated() / (1024**3), 2),
+        "cuda_reserved_gb": round(torch.cuda.memory_reserved() / (1024**3), 2),
+    }
+
+
 def main() -> None:
     # Before TensorFlow (pulled in by torch.utils.tensorboard) loads — fewer cuDNN/oneDNN stderr lines.
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
@@ -43,9 +55,28 @@ def main() -> None:
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
     seed_everything(cfg["seed"])
     device = pick_device()
+    if device.type == "cuda":
+        total_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+        if int(cfg["train"]["batch_size"]) > 16 and total_gb < 24:
+            old_batch = int(cfg["train"]["batch_size"])
+            cfg["train"]["batch_size"] = 16
+            cfg["train"]["val_batch_size"] = min(int(cfg["train"].get("val_batch_size", 8)), 8)
+            print(
+                json.dumps(
+                    {
+                        "event": "batch_size_autoreduced",
+                        "from": old_batch,
+                        "to": cfg["train"]["batch_size"],
+                        "reason": "Colab GPU has <24GB VRAM; batch>16 with LPIPS is unstable for 1024x256 strips",
+                        **_cuda_mem(),
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
     num_epochs = args.max_epochs or cfg["train"]["num_epochs"]
     print(
-        json.dumps({"device": str(device), "epochs": num_epochs, "batch_size": cfg["train"]["batch_size"]}, ensure_ascii=False),
+        json.dumps({"device": str(device), "epochs": num_epochs, "batch_size": cfg["train"]["batch_size"], **_cuda_mem()}, ensure_ascii=False),
         flush=True,
     )
     cache_root = Path(cfg["dataset"].get("cache_root", "outputs/strip_cache"))
@@ -67,7 +98,8 @@ def main() -> None:
         common_loader["persistent_workers"] = True
         common_loader["prefetch_factor"] = 2
     train_loader = DataLoader(train_ds, batch_size=cfg["train"]["batch_size"], shuffle=True, num_workers=train_workers, worker_init_fn=worker_init_fn, **common_loader)
-    val_loader = DataLoader(val_ds, batch_size=max(1, cfg["train"]["batch_size"] // 2), shuffle=False, num_workers=val_workers, worker_init_fn=worker_init_fn if val_workers > 0 else None, **common_loader)
+    val_batch_size = int(cfg["train"].get("val_batch_size", max(1, cfg["train"]["batch_size"] // 2)))
+    val_loader = DataLoader(val_ds, batch_size=max(1, val_batch_size), shuffle=False, num_workers=val_workers, worker_init_fn=worker_init_fn if val_workers > 0 else None, **common_loader)
     model = SeamResUNet(residual_mode=cfg["model"]["residual_mode"], low_freq_sigma=cfg["model"]["low_freq_sigma"]).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["train"]["lr"], weight_decay=cfg["train"]["weight_decay"], betas=tuple(cfg["train"]["betas"]))
     ema = EMA(model, decay=cfg["ema"]["decay"])
@@ -134,7 +166,12 @@ def main() -> None:
             print(json.dumps({"tensorboard": "disabled", "reason": str(e)}, ensure_ascii=False), flush=True)
     global_step = 0
     # One LPIPS / SeamLossComputer for all epochs (avoids re-loading alex.net weights every epoch).
-    loss_computer = SeamLossComputer()
+    loss_cfg = cfg.get("loss") or {}
+    loss_computer = SeamLossComputer(
+        lpips_enabled=bool(loss_cfg.get("lpips_enabled", True)),
+        lpips_max_batch=int(loss_cfg.get("lpips_max_batch", 4)),
+        lpips_resize=loss_cfg.get("lpips_resize", 256),
+    )
     epoch_use_tqdm = sys.stderr.isatty()
     epoch_bar = tqdm(
         range(start_epoch, num_epochs),

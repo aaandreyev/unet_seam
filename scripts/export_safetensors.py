@@ -17,6 +17,9 @@ def main() -> None:
     args = parser.parse_args()
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
     ckpt = load_checkpoint(Path(cfg["checkpoint"]), map_location="cpu")
+    train_cfg = ckpt.get("config") or {}
+    model_cfg = train_cfg.get("model") or {}
+    train_section = train_cfg.get("train") or {}
     export_root = Path(cfg["export_root"])
     export_root.mkdir(parents=True, exist_ok=True)
     model_path = export_root / f"{cfg['model_name']}.safetensors"
@@ -28,9 +31,12 @@ def main() -> None:
             "in_channels": 5,
             "out_channels": 3,
             "base_channels": 32,
+            "groups": 8,
             "depth": 4,
             "bottleneck": {"gap_film": True, "lf_branch": True},
             "residual_cap_tanh_scale": 0.3,
+            "residual_mode": model_cfg.get("residual_mode", "full"),
+            "low_freq_sigma": model_cfg.get("low_freq_sigma", 6.0),
             "decay_window": "cosine",
         },
         "strip": {
@@ -54,7 +60,9 @@ def main() -> None:
         },
         "training": {
             "dataset": "synthetic_only_v1",
-            "epochs": 20,
+            "epochs": train_section.get("num_epochs"),
+            "batch_size": train_section.get("batch_size"),
+            "val_batch_size": train_section.get("val_batch_size"),
             "ema_decay": 0.999,
             "git_hash": ckpt.get("git_hash", "nogit"),
             "commit_date": datetime.now(timezone.utc).isoformat(),

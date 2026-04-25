@@ -25,7 +25,10 @@ def main() -> None:
         in_channels=a["in_channels"],
         out_channels=a["out_channels"],
         base_channels=a["base_channels"],
+        groups=a.get("groups", 8),
         residual_cap=a["residual_cap_tanh_scale"],
+        residual_mode=a.get("residual_mode", "full"),
+        low_freq_sigma=a.get("low_freq_sigma", 6.0),
     )
     model.load_state_dict(state)
     model.eval()

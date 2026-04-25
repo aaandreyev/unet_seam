@@ -15,6 +15,11 @@ dataset:
 model:
   residual_mode: full
   low_freq_sigma: 6.0
+loss:
+  lpips_enabled: true
+  lpips_max_batch: 4
+  lpips_resize: 256
+  # Full-resolution LPIPS on 1024x256 strips is too memory-heavy for Colab at large batch sizes.
 train:
   seed: 42
   optimizer: AdamW

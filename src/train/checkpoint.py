@@ -11,11 +11,16 @@ import torch
 
 def save_checkpoint(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(payload, path)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    torch.save(payload, tmp_path)
+    tmp_path.replace(path)
 
 
 def load_checkpoint(path: Path, map_location: str = "cpu") -> dict:
-    return torch.load(path, map_location=map_location)
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
 
 
 def capture_rng_state() -> dict:
@@ -64,6 +69,7 @@ def save_training_checkpoint(
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "scaler": scaler.state_dict() if scaler is not None else None,
         "epoch": epoch,
+        "config": config,
         "rng_state": capture_rng_state(),
         "config_hash": config_hash(config),
         "git_hash": git_hash(),

@@ -1,0 +1,13 @@
+{
+  "protocol": "agent-collab-min",
+  "version": "1.0",
+  "core": {
+    "topic": "unet_seam",
+    "participants": [],
+    "tasks": [],
+    "messages": [],
+    "artifacts": [],
+    "finalize_votes": [],
+    "round_status": "open"
+  }
+}

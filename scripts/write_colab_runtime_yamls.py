@@ -14,6 +14,7 @@ def main() -> None:
     ap.add_argument("--project-root", type=Path, required=True)
     ap.add_argument("--data-root", type=Path, required=True)
     ap.add_argument("--train-batch-size", type=int, required=True)
+    ap.add_argument("--val-batch-size", type=int, required=True)
     ap.add_argument("--train-epochs", type=int, required=True)
     ap.add_argument("--train-num-workers", type=int, required=True)
     ap.add_argument("--primary-checkpoint", type=str, default="best_boundary_ciede2000.pt")
@@ -33,10 +34,12 @@ def main() -> None:
     train_cfg["dataset"]["train_cache_manifest"] = str(dr / "manifests" / "strip_train_cache.jsonl")
     train_cfg["dataset"]["val_cache_manifest"] = str(dr / "manifests" / "strip_val_cache.jsonl")
     train_cfg["train"]["batch_size"] = args.train_batch_size
+    train_cfg["train"]["val_batch_size"] = args.val_batch_size
     train_cfg["train"]["num_epochs"] = args.train_epochs
     train_cfg["train"]["num_workers"] = args.train_num_workers
     eval_cfg["checkpoint"] = str(local_ckpt / args.primary_checkpoint)
     eval_cfg["report_root"] = str(local_eval)
+    eval_cfg["batch_size"] = args.val_batch_size
     eval_cfg["cache_root"] = str(dr / "outputs" / "strip_cache")
     eval_cfg["val_cache_manifest"] = str(dr / "manifests" / "strip_val_cache.jsonl")
     export_cfg["checkpoint"] = str(local_ckpt / args.primary_checkpoint)

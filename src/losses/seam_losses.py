@@ -22,8 +22,8 @@ def sobel_gradients(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 class SeamLossComputer:
-    def __init__(self) -> None:
-        self.lpips_hf = BoundaryLPIPSLoss()
+    def __init__(self, lpips_enabled: bool = True, lpips_max_batch: int = 4, lpips_resize: int | None = 256) -> None:
+        self.lpips_hf = BoundaryLPIPSLoss(enabled=lpips_enabled, max_batch=lpips_max_batch, resize=lpips_resize)
         self.lowfreq_sigmas = (2.0, 4.0, 8.0, 16.0, 32.0)
 
     def __call__(self, pred: torch.Tensor, target: torch.Tensor, input_rgb: torch.Tensor, inner_mask: torch.Tensor, boundary_band: torch.Tensor, residual: torch.Tensor) -> dict[str, torch.Tensor]:

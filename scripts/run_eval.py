@@ -47,8 +47,15 @@ def main() -> None:
         dataset = CachedStripDataset(val_cache_manifest, cache_root)
     else:
         dataset = SyntheticStripDataset(Path("manifests/input_raw_manifest.jsonl"), split="val", strips_per_image=1)
-    loader = DataLoader(dataset, batch_size=1, shuffle=False, collate_fn=collate_strip_batch)
-    print(json.dumps({"device": str(device), "val_samples": len(dataset)}, ensure_ascii=False))
+    batch_size = max(1, int(cfg.get("batch_size", 1)))
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_strip_batch,
+        pin_memory=device.type == "cuda",
+    )
+    print(json.dumps({"device": str(device), "val_samples": len(dataset), "batch_size": batch_size}, ensure_ascii=False))
     result, _ = run_epoch(model, loader, None, device, desc="eval")
     run_dir = Path(cfg["report_root"]) / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     run_dir.mkdir(parents=True, exist_ok=True)
