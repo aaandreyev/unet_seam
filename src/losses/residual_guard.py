@@ -12,3 +12,10 @@ def residual_smoothness_loss(residual: torch.Tensor) -> torch.Tensor:
 def residual_magnitude_loss(residual: torch.Tensor, cap: float = 0.3) -> torch.Tensor:
     over = (residual.abs() - cap).clamp(min=0.0)
     return over.mean()
+
+
+def residual_l1_loss(residual: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    values = residual.abs()
+    if mask is not None:
+        values = values * mask
+    return values.mean()

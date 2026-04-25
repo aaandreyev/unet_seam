@@ -31,6 +31,15 @@ from src.utils.device import amp_enabled, pick_device
 from src.utils.seed import seed_everything, worker_init_fn
 
 
+def _quality_score(metrics: dict[str, float]) -> float:
+    boundary = metrics.get("boundary_ciede2000", float("inf"))
+    baseline = metrics.get("baseline_boundary_ciede2000", boundary)
+    identity = metrics.get("outer_identity_error", 0.0)
+    residual_p99 = metrics.get("residual_magnitude_p99", 0.0)
+    no_improve_penalty = max(boundary - baseline, 0.0) * 2.0
+    return boundary + 50.0 * identity + 10.0 * residual_p99 + no_improve_penalty
+
+
 def _cuda_mem() -> dict[str, float]:
     if not torch.cuda.is_available():
         return {}
@@ -115,19 +124,28 @@ def main() -> None:
         "boundary_mae": float("inf"),
         "outer_identity_error": float("inf"),
         "relative_improvement": float("-inf"),
+        "quality_score": float("inf"),
     }
+    resume_state = None
     if args.resume:
-        state = load_checkpoint(Path(args.resume), map_location=device.type)
-        model.load_state_dict(state["model"])
-        ema.load_state_dict(state["ema"])
-        optimizer.load_state_dict(state["optimizer"])
-        if state.get("scheduler") is not None:
-            scheduler.load_state_dict(state["scheduler"])
-        if state.get("scaler") is not None:
-            scaler.load_state_dict(state["scaler"])
-        restore_rng_state(state["rng_state"])
-        start_epoch = int(state["epoch"]) + 1
-        print(json.dumps({"event": "resumed", "start_epoch": start_epoch}, ensure_ascii=False), flush=True)
+        resume_state = load_checkpoint(Path(args.resume), map_location=device.type)
+        model.load_state_dict(resume_state["model"])
+        ema.load_state_dict(resume_state["ema"])
+        optimizer.load_state_dict(resume_state["optimizer"])
+        if resume_state.get("scheduler") is not None:
+            scheduler.load_state_dict(resume_state["scheduler"])
+        if resume_state.get("scaler") is not None:
+            scaler.load_state_dict(resume_state["scaler"])
+        restore_rng_state(resume_state.get("rng_state", {}))
+        start_epoch = int(resume_state["epoch"]) + 1
+        resumed_val = (resume_state.get("metrics") or {}).get("val") or {}
+        if resumed_val:
+            best["boundary_ciede2000"] = resumed_val.get("boundary_ciede2000", best["boundary_ciede2000"])
+            best["boundary_mae"] = resumed_val.get("boundary_mae", best["boundary_mae"])
+            best["outer_identity_error"] = resumed_val.get("outer_identity_error", best["outer_identity_error"])
+            best["relative_improvement"] = resumed_val.get("relative_improvement", best["relative_improvement"])
+            best["quality_score"] = _quality_score(resumed_val)
+        print(json.dumps({"event": "resumed", "start_epoch": start_epoch, "resume_val_metrics": resumed_val}, ensure_ascii=False), flush=True)
     log_cfg: dict = cfg.get("logging") or {}
     console_iv = int(log_cfg.get("console_log_interval", 25))
     print(
@@ -164,13 +182,14 @@ def main() -> None:
             print(json.dumps({"tensorboard_logdir": str(log_dir.resolve())}, ensure_ascii=False), flush=True)
         except Exception as e:  # noqa: BLE001
             print(json.dumps({"tensorboard": "disabled", "reason": str(e)}, ensure_ascii=False), flush=True)
-    global_step = 0
+    global_step = start_epoch * len(train_loader)
     # One LPIPS / SeamLossComputer for all epochs (avoids re-loading alex.net weights every epoch).
     loss_cfg = cfg.get("loss") or {}
     loss_computer = SeamLossComputer(
         lpips_enabled=bool(loss_cfg.get("lpips_enabled", True)),
         lpips_max_batch=int(loss_cfg.get("lpips_max_batch", 4)),
         lpips_resize=loss_cfg.get("lpips_resize", 256),
+        weights={key: float(value) for key, value in (loss_cfg.get("weights") or {}).items()},
     )
     epoch_use_tqdm = sys.stderr.isatty()
     epoch_bar = tqdm(
@@ -245,6 +264,7 @@ def main() -> None:
             current_epoch=epoch + 1,
             total_epochs=num_epochs,
         )
+        val_result.metrics["quality_score"] = _quality_score(val_result.metrics)
         if tb_writer is not None:
             for k, v in val_result.losses.items():
                 tb_writer.add_scalar(f"val/loss_{k}", v, global_step)
@@ -266,6 +286,9 @@ def main() -> None:
         if val_result.metrics.get("relative_improvement", float("-inf")) > best["relative_improvement"]:
             best["relative_improvement"] = val_result.metrics["relative_improvement"]
             save_training_checkpoint(Path("outputs/checkpoints/best_relative_improvement.pt"), model=model, ema_state=ema.state_dict(), optimizer=optimizer, scheduler=scheduler, scaler=scaler, epoch=epoch, config=cfg, metrics=metrics)
+        if val_result.metrics["quality_score"] < best["quality_score"]:
+            best["quality_score"] = val_result.metrics["quality_score"]
+            save_training_checkpoint(Path("outputs/checkpoints/best_quality.pt"), model=model, ema_state=ema.state_dict(), optimizer=optimizer, scheduler=scheduler, scaler=scaler, epoch=epoch, config=cfg, metrics=metrics)
         epoch_bar.set_postfix(
             sec=f"{time.time()-epoch_start:.1f}",
             val_b=f"{val_result.metrics.get('boundary_ciede2000', 0.0):.3f}",

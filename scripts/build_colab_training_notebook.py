@@ -13,50 +13,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "colab" / "seam_residual_corrector_train_eval_colab.ipynb"
 
-EMBED_FILES = [
-    "configs/model_resunet_v1.yaml",
-    "configs/train_synth_v1.yaml",
-    "configs/eval_v1.yaml",
-    "configs/export_v1.yaml",
-    "src/__init__.py",
-    "src/data/__init__.py",
-    "src/data/manifest.py",
-    "src/data/preprocess.py",
-    "src/data/strip_geometry.py",
-    "src/data/corruptions.py",
-    "src/data/synthetic_strip_dataset.py",
-    "src/data/cached_strip_dataset.py",
-    "src/models/__init__.py",
-    "src/models/blocks.py",
-    "src/models/resunet.py",
-    "src/losses/__init__.py",
-    "src/losses/lowfreq.py",
-    "src/losses/perceptual.py",
-    "src/losses/residual_guard.py",
-    "src/losses/seam_losses.py",
-    "src/metrics/__init__.py",
-    "src/metrics/bootstrap.py",
-    "src/metrics/deltae.py",
-    "src/metrics/lowfreq_metrics.py",
-    "src/metrics/reports.py",
-    "src/metrics/seam_metrics.py",
-    "src/train/__init__.py",
-    "src/train/checkpoint.py",
-    "src/train/ema.py",
-    "src/train/scheduler.py",
-    "src/train/train_loop.py",
-    "src/utils/__init__.py",
-    "src/utils/device.py",
-    "src/utils/image_io.py",
-    "src/utils/phash.py",
-    "src/utils/seed.py",
-    "scripts/train_resunet.py",
-    "scripts/run_eval.py",
-    "scripts/export_safetensors.py",
-    "scripts/verify_export.py",
-]
-
-
 def md(text: str) -> dict:
     return {"cell_type": "markdown", "metadata": {}, "source": text}
 
@@ -65,15 +21,7 @@ def code(text: str) -> dict:
     return {"cell_type": "code", "metadata": {}, "execution_count": None, "outputs": [], "source": text}
 
 
-def file_map_literal() -> str:
-    file_map = {}
-    for rel in EMBED_FILES:
-        file_map[rel] = (ROOT / rel).read_text(encoding="utf-8")
-    return json.dumps(file_map, ensure_ascii=False, indent=2)
-
-
 def build_notebook() -> dict:
-    files_literal = file_map_literal()
     cells = [
         md(
             "# Seam Residual Corrector v1 Colab Notebook\n\n"
@@ -88,6 +36,9 @@ def build_notebook() -> dict:
             "DATASET_BUNDLE_DRIVE_PATH = '/content/drive/MyDrive/unet_seam/seam_residual_corrector_training_bundle.tar.gz'\n"
             "DRIVE_RUNS_DIR = '/content/drive/MyDrive/unet_seam_runs'\n"
             "RUN_NAME = 'seam_residual_corrector_v1_run001'\n"
+            "REPO_CLONE_URL = 'https://github.com/aaandreyev/unet_seam.git'\n"
+            "REPO_CLONE_REF = 'main'\n"
+            "RUNTIME_ZIP_URL = ''\n"
             "USE_RAMDISK = True\n"
             "RAMDISK_SIZE_GB = 48\n"
             "COPY_ARCHIVE_TO_RAM_FIRST = True\n"
@@ -202,15 +153,64 @@ def build_notebook() -> dict:
             "print('bundle extracted to', DATA_ROOT)\n"
         ),
         code(
-            "# 5. WRITE PROJECT FILES INTO RUNTIME\n"
-            "import json, os, sys\n"
-            f"PROJECT_FILES = {files_literal}\n"
-            "for rel, text in PROJECT_FILES.items():\n"
-            "    path = PROJECT_ROOT / rel\n"
-            "    path.parent.mkdir(parents=True, exist_ok=True)\n"
-            "    path.write_text(text, encoding='utf-8')\n"
+            "# 5. FETCH PROJECT FROM GIT OR ZIP (self-contained policy: no embedded repo copy in the notebook)\n"
+            "import os\n"
+            "import shutil\n"
+            "import subprocess\n"
+            "import sys\n"
+            "import urllib.request\n"
+            "import zipfile\n"
+            "from pathlib import Path\n\n\n"
+            "def _clone_repo() -> bool:\n"
+            "    if not REPO_CLONE_URL:\n"
+            "        return False\n"
+            "    if PROJECT_ROOT.exists():\n"
+            "        shutil.rmtree(PROJECT_ROOT)\n"
+            "    PROJECT_ROOT.parent.mkdir(parents=True, exist_ok=True)\n"
+            "    subprocess.run(\n"
+            "        [\n"
+            "            'git',\n"
+            "            'clone',\n"
+            "            '--depth',\n"
+            "            '1',\n"
+            "            '-b',\n"
+            "            REPO_CLONE_REF,\n"
+            "            REPO_CLONE_URL,\n"
+            "            str(PROJECT_ROOT),\n"
+            "        ],\n"
+            "        check=True,\n"
+            "    )\n"
+            "    return True\n\n\n"
+            "def _unpack_zip() -> None:\n"
+            "    if not RUNTIME_ZIP_URL:\n"
+            "        raise ValueError('RUNTIME_ZIP_URL is empty')\n"
+            "    if PROJECT_ROOT.exists():\n"
+            "        shutil.rmtree(PROJECT_ROOT)\n"
+            "    zpath = Path('/tmp/unet_seam_runtime_src.zip')\n"
+            "    print('downloading:', RUNTIME_ZIP_URL)\n"
+            "    urllib.request.urlretrieve(RUNTIME_ZIP_URL, zpath)\n"
+            "    tmp = Path('/tmp/unet_seam_src_extract')\n"
+            "    if tmp.exists():\n"
+            "        shutil.rmtree(tmp)\n"
+            "    tmp.mkdir(parents=True)\n"
+            "    with zipfile.ZipFile(zpath, 'r') as zf:\n"
+            "        zf.extractall(tmp)\n"
+            "    top = [p for p in tmp.iterdir() if p.is_dir()]\n"
+            "    if len(top) != 1:\n"
+            "        raise RuntimeError('zip must contain exactly one top-level directory, got: ' + repr([p.name for p in top]))\n"
+            "    shutil.move(str(top[0]), str(PROJECT_ROOT))\n\n\n"
+            "if _clone_repo():\n"
+            "    pass\n"
+            "elif RUNTIME_ZIP_URL:\n"
+            "    _unpack_zip()\n"
+            "else:\n"
+            "    raise ValueError(\n"
+            "        'Set REPO_CLONE_URL or RUNTIME_ZIP_URL in PARAMS. '\n"
+            "        'This notebook does not embed the repository; code must come from git or a zip URL.'\n"
+            "    )\n\n"
             "sys.path.insert(0, str(PROJECT_ROOT))\n"
-            "print('project files written:', len(PROJECT_FILES))\n"
+            "_n_py = sum(1 for _ in PROJECT_ROOT.rglob('*.py'))\n"
+            "print('PROJECT_ROOT =', PROJECT_ROOT, '| python files =', _n_py)\n"
         ),
         code(
             "# 6. VALIDATE BUNDLE LAYOUT\n"
@@ -300,6 +300,37 @@ def build_notebook() -> dict:
             "print('background sync started (first tick already ran)')\n"
         ),
         code(
+            "# 10b. TensorBoard (можно запускать до или после TRAIN; во время блокирующей ячейки TRAIN новая ячейка Colab не стартует)\n"
+            "import subprocess, sys, time, shutil\n"
+            "from google.colab import output\n"
+            "\n"
+            "subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"-q\", \"protobuf<5\", \"tensorboard\"], check=True)\n"
+            "\n"
+            "LOGDIR = PROJECT_ROOT / \"outputs\" / \"logs\" / \"tensorboard\"\n"
+            "LOGDIR.mkdir(parents=True, exist_ok=True)\n"
+            "subprocess.Popen(\n"
+            "    [sys.executable, \"-m\", \"tensorboard.main\", \"--logdir\", str(LOGDIR), \"--port\", \"6006\", \"--bind_all\"],\n"
+            "    start_new_session=True,\n"
+            "    stdout=subprocess.DEVNULL,\n"
+            "    stderr=subprocess.STDOUT,\n"
+            ")\n"
+            "time.sleep(5)\n"
+            "DRIVE_TB = DRIVE_RUN_DIR / \"tensorboard\"\n"
+            "DRIVE_TB.mkdir(parents=True, exist_ok=True)\n"
+            "for path in LOGDIR.rglob(\"*\"):\n"
+            "    if path.is_file():\n"
+            "        rel = path.relative_to(LOGDIR)\n"
+            "        out = DRIVE_TB / rel\n"
+            "        out.parent.mkdir(parents=True, exist_ok=True)\n"
+            "        try:\n"
+            "            shutil.copy2(path, out)\n"
+            "        except OSError:\n"
+            "            pass\n"
+            "print(\"LOGDIR =\", LOGDIR, \"| копия на Drive:\", DRIVE_TB)\n"
+            "output.serve_kernel_port_as_window(6006, path=\"/\")\n"
+            "print(\"Если встроенный просмотр серый — открой ссылку в новой вкладке.\")"
+        ),
+        code(
             "# 10. TRAIN\n"
             "import os, sys, subprocess, threading\n"
             "if not (PROJECT_ROOT / 'runtime_configs' / 'train.yaml').is_file():\n"
@@ -338,37 +369,6 @@ def build_notebook() -> dict:
             "        print(f'\\n[exit {rc}] Причина — в Traceback/ошибке ВЫШЕ. CalledProcessError — только итог.', flush=True)\n"
             "        raise subprocess.CalledProcessError(rc, cmd)\n"
             "_stream_cmd(cmd, str(PROJECT_ROOT), env)\n"
-        ),
-        code(
-            "# 10b. TensorBoard (можно запускать до или после TRAIN; во время блокирующей ячейки TRAIN новая ячейка Colab не стартует)\n"
-            "import subprocess, sys, time, shutil\n"
-            "from google.colab import output\n"
-            "\n"
-            "subprocess.run([sys.executable, \"-m\", \"pip\", \"install\", \"-q\", \"protobuf<5\", \"tensorboard\"], check=True)\n"
-            "\n"
-            "LOGDIR = PROJECT_ROOT / \"outputs\" / \"logs\" / \"tensorboard\"\n"
-            "LOGDIR.mkdir(parents=True, exist_ok=True)\n"
-            "subprocess.Popen(\n"
-            "    [sys.executable, \"-m\", \"tensorboard.main\", \"--logdir\", str(LOGDIR), \"--port\", \"6006\", \"--bind_all\"],\n"
-            "    start_new_session=True,\n"
-            "    stdout=subprocess.DEVNULL,\n"
-            "    stderr=subprocess.STDOUT,\n"
-            ")\n"
-            "time.sleep(5)\n"
-            "DRIVE_TB = DRIVE_RUN_DIR / \"tensorboard\"\n"
-            "DRIVE_TB.mkdir(parents=True, exist_ok=True)\n"
-            "for path in LOGDIR.rglob(\"*\"):\n"
-            "    if path.is_file():\n"
-            "        rel = path.relative_to(LOGDIR)\n"
-            "        out = DRIVE_TB / rel\n"
-            "        out.parent.mkdir(parents=True, exist_ok=True)\n"
-            "        try:\n"
-            "            shutil.copy2(path, out)\n"
-            "        except OSError:\n"
-            "            pass\n"
-            "print(\"LOGDIR =\", LOGDIR, \"| копия на Drive:\", DRIVE_TB)\n"
-            "output.serve_kernel_port_as_window(6006, path=\"/\")\n"
-            "print(\"Если встроенный просмотр серый — открой ссылку в новой вкладке.\")"
         ),
         code(
             "# 11. EVAL\n"

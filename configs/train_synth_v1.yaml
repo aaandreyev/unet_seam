@@ -20,6 +20,16 @@ loss:
   lpips_max_batch: 4
   lpips_resize: 256
   # Full-resolution LPIPS on 1024x256 strips is too memory-heavy for Colab at large batch sizes.
+  weights:
+    inner: 1.0
+    boundary: 4.0
+    lowfreq: 0.5
+    grad: 0.5
+    identity: 2.0
+    lpips_hf: 0.05
+    smooth: 0.10
+    residual_l1: 0.50
+    residual_over_cap: 0.05
 train:
   seed: 42
   optimizer: AdamW

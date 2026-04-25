@@ -4,7 +4,7 @@ import torch
 
 from src.losses.lowfreq import multiscale_lowfreq_loss
 from src.losses.perceptual import BoundaryLPIPSLoss
-from src.losses.residual_guard import residual_magnitude_loss, residual_smoothness_loss
+from src.losses.residual_guard import residual_l1_loss, residual_magnitude_loss, residual_smoothness_loss
 
 
 def charbonnier(diff: torch.Tensor) -> torch.Tensor:
@@ -22,9 +22,27 @@ def sobel_gradients(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 class SeamLossComputer:
-    def __init__(self, lpips_enabled: bool = True, lpips_max_batch: int = 4, lpips_resize: int | None = 256) -> None:
+    def __init__(
+        self,
+        lpips_enabled: bool = True,
+        lpips_max_batch: int = 4,
+        lpips_resize: int | None = 256,
+        weights: dict[str, float] | None = None,
+    ) -> None:
         self.lpips_hf = BoundaryLPIPSLoss(enabled=lpips_enabled, max_batch=lpips_max_batch, resize=lpips_resize)
         self.lowfreq_sigmas = (2.0, 4.0, 8.0, 16.0, 32.0)
+        default_weights = {
+            "inner": 1.0,
+            "boundary": 4.0,
+            "lowfreq": 0.5,
+            "grad": 0.5,
+            "identity": 2.0,
+            "lpips_hf": 0.05,
+            "smooth": 0.10,
+            "residual_l1": 0.50,
+            "residual_over_cap": 0.05,
+        }
+        self.weights = default_weights | (weights or {})
 
     def __call__(self, pred: torch.Tensor, target: torch.Tensor, input_rgb: torch.Tensor, inner_mask: torch.Tensor, boundary_band: torch.Tensor, residual: torch.Tensor) -> dict[str, torch.Tensor]:
         outer_mask = 1.0 - inner_mask
@@ -39,16 +57,19 @@ class SeamLossComputer:
         l_identity = ((pred - input_rgb).abs() * outer_mask).mean()
         l_lpips_hf = self.lpips_hf(pred, target, boundary_band)
         l_smooth = residual_smoothness_loss(residual)
+        l_residual_l1 = residual_l1_loss(residual, inner_mask)
         l_mag = residual_magnitude_loss(residual)
+        w = self.weights
         total = (
-            1.00 * l_inner
-            + 2.00 * l_boundary
-            + 1.00 * l_lowfreq
-            + 0.50 * l_grad
-            + 0.20 * l_identity
-            + 0.10 * l_lpips_hf
-            + 0.05 * l_smooth
-            + 0.01 * l_mag
+            w["inner"] * l_inner
+            + w["boundary"] * l_boundary
+            + w["lowfreq"] * l_lowfreq
+            + w["grad"] * l_grad
+            + w["identity"] * l_identity
+            + w["lpips_hf"] * l_lpips_hf
+            + w["smooth"] * l_smooth
+            + w["residual_l1"] * l_residual_l1
+            + w["residual_over_cap"] * l_mag
         )
         return {
             "total": total,
@@ -59,5 +80,6 @@ class SeamLossComputer:
             "l_identity": l_identity,
             "l_lpips_hf": l_lpips_hf,
             "l_residual_smooth": l_smooth,
+            "l_residual_l1": l_residual_l1,
             "l_residual_magnitude": l_mag,
         }

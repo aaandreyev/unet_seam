@@ -124,7 +124,7 @@ def run_epoch(
             with amp_ctx:
                 residual = model(inputs)
                 pred = (input_rgb + residual).clamp(0.0, 1.0)
-                pred[:, :, :, :128] = input_rgb[:, :, :, :128]
+                pred = pred * inner_mask + input_rgb * (1.0 - inner_mask)
                 losses = loss_computer(pred, target, input_rgb, inner_mask, boundary, residual)
         if train_mode:
             assert optimizer is not None

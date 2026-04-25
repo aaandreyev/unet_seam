@@ -3,7 +3,9 @@ from __future__ import annotations
 import json
 import os
 import random
+import warnings
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -34,12 +36,33 @@ def capture_rng_state() -> dict:
     return state
 
 
+def _as_cpu_byte_tensor(value: Any) -> torch.ByteTensor:
+    if isinstance(value, torch.Tensor):
+        return value.detach().to(device="cpu", dtype=torch.uint8)
+    if isinstance(value, np.ndarray):
+        return torch.from_numpy(value).to(dtype=torch.uint8, device="cpu")
+    if isinstance(value, (bytes, bytearray)):
+        return torch.tensor(list(value), dtype=torch.uint8)
+    if isinstance(value, (list, tuple)):
+        return torch.tensor(value, dtype=torch.uint8)
+    raise TypeError(f"unsupported RNG tensor type: {type(value)!r}")
+
+
 def restore_rng_state(state: dict) -> None:
-    torch.set_rng_state(state["torch"])
-    np.random.set_state(state["numpy"])
-    random.setstate(state["python"])
-    if torch.cuda.is_available() and "cuda" in state:
-        torch.cuda.set_rng_state_all(state["cuda"])
+    if not state:
+        return
+    try:
+        if "torch" in state:
+            torch.set_rng_state(_as_cpu_byte_tensor(state["torch"]))
+        if "numpy" in state:
+            np.random.set_state(state["numpy"])
+        if "python" in state:
+            random.setstate(state["python"])
+        if torch.cuda.is_available() and "cuda" in state:
+            cuda_states = [_as_cpu_byte_tensor(item) for item in state["cuda"]]
+            torch.cuda.set_rng_state_all(cuda_states)
+    except Exception as exc:  # noqa: BLE001
+        warnings.warn(f"Skipping incompatible RNG state restore: {exc}", RuntimeWarning, stacklevel=2)
 
 
 def config_hash(config: dict) -> str:

@@ -34,15 +34,22 @@ def _residual_abs_p99(residual: torch.Tensor, max_elements: int = 4_000_000) -> 
 
 
 def evaluate_batch(pred: torch.Tensor, target: torch.Tensor, input_rgb: torch.Tensor, inner_mask: torch.Tensor, boundary_band: torch.Tensor, residual: torch.Tensor) -> dict[str, float]:
-    pred_np = _to_numpy(pred)[0]
-    target_np = _to_numpy(target)[0]
-    input_np = _to_numpy(input_rgb)[0]
-    boundary_np = _to_numpy(boundary_band)[0][..., :1]
-    baseline_boundary = boundary_ciede2000(input_np, target_np, boundary_np)
     oracle = match_lowfreq(input_rgb, target, inner_mask, sigma=16.0)
-    oracle_np = _to_numpy(oracle)[0]
-    oracle_boundary = boundary_ciede2000(oracle_np, target_np, boundary_np)
-    pred_boundary = boundary_ciede2000(pred_np, target_np, boundary_np)
+    pred_np = _to_numpy(pred)
+    target_np = _to_numpy(target)
+    input_np = _to_numpy(input_rgb)
+    boundary_np = _to_numpy(boundary_band)[..., :1]
+    oracle_np = _to_numpy(oracle)
+    pred_boundaries = []
+    baseline_boundaries = []
+    oracle_boundaries = []
+    for i in range(pred_np.shape[0]):
+        pred_boundaries.append(boundary_ciede2000(pred_np[i], target_np[i], boundary_np[i]))
+        baseline_boundaries.append(boundary_ciede2000(input_np[i], target_np[i], boundary_np[i]))
+        oracle_boundaries.append(boundary_ciede2000(oracle_np[i], target_np[i], boundary_np[i]))
+    pred_boundary = float(np.mean(pred_boundaries))
+    baseline_boundary = float(np.mean(baseline_boundaries))
+    oracle_boundary = float(np.mean(oracle_boundaries))
     metrics = {
         "boundary_ciede2000": pred_boundary,
         "boundary_mae": _boundary_mae(pred, target, boundary_band),
