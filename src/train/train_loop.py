@@ -130,7 +130,7 @@ def run_epoch(
             b_ciede=f"{agg_metrics.get('boundary_ciede2000', 0.0) / steps:.3f}",
             rel=f"{agg_metrics.get('relative_improvement', 0.0) / steps:.3f}",
         )
-        if console_log_interval > 0 and train_mode:
+        if console_log_interval > 0:
             if steps == 1 or steps % console_log_interval == 0 or (n_batches is not None and steps == n_batches):
                 gs = tb_global_step + steps
                 elapsed_epoch = time.monotonic() - t_epoch_start
@@ -139,7 +139,7 @@ def run_epoch(
                     sec_per = elapsed_epoch / steps
                     eta_epoch = sec_per * (n_batches - steps)
                 out: dict[str, Any] = {
-                    "event": "train_step",
+                    "event": "train_step" if train_mode else "val_step",
                     "desc": desc,
                     "epoch": current_epoch,
                     "of_epochs": total_epochs,
