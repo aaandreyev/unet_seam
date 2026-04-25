@@ -31,8 +31,8 @@ train:
   weight_decay: 1.0e-4
   betas: [0.9, 0.99]
   precision: bf16
-  batch_size: 128
-  val_batch_size: 256
+  batch_size: 64
+  val_batch_size: 128
   num_epochs: 20
   num_workers: 4
 scheduler:
