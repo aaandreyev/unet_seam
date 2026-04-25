@@ -210,7 +210,14 @@ def main() -> None:
         total_steps=max(len(train_loader) * total_epochs, 1),
         min_lr_scale=float(cfg.get("scheduler", {}).get("min_lr_scale", 0.005)),
     )
+    # EMA uses deepcopy — must be created before torch.compile so it copies the raw nn.Module.
     ema = EMA(model, decay=float(cfg.get("ema", {}).get("decay", 0.999)))
+    if device.type == "cuda" and hasattr(torch, "compile") and train_cfg.get("compile", True):
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+            print(json.dumps({"event": "torch_compile", "status": "ok"}, ensure_ascii=False), flush=True)
+        except Exception as exc:
+            print(json.dumps({"event": "torch_compile", "status": "skipped", "reason": str(exc)}, ensure_ascii=False), flush=True)
     start_epoch = 0
     best_quality = float("inf")
     if args.resume:

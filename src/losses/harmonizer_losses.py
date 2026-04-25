@@ -11,13 +11,16 @@ def charbonnier(diff: torch.Tensor, eps: float = 1e-3) -> torch.Tensor:
     return torch.sqrt(diff.square() + eps * eps)
 
 
+_SOBEL_X = torch.tensor([[1.0, 0.0, -1.0], [2.0, 0.0, -2.0], [1.0, 0.0, -1.0]]).view(1, 1, 3, 3)
+_SOBEL_Y = torch.tensor([[1.0, 2.0, 1.0], [0.0, 0.0, 0.0], [-1.0, -2.0, -1.0]]).view(1, 1, 3, 3)
+
+
 def sobel_gradients(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    kernel_x = torch.tensor([[1, 0, -1], [2, 0, -2], [1, 0, -1]], dtype=x.dtype, device=x.device).view(1, 1, 3, 3)
-    kernel_y = torch.tensor([[1, 2, 1], [0, 0, 0], [-1, -2, -1]], dtype=x.dtype, device=x.device).view(1, 1, 3, 3)
-    kernels_x = kernel_x.repeat(x.shape[1], 1, 1, 1)
-    kernels_y = kernel_y.repeat(x.shape[1], 1, 1, 1)
-    gx = F.conv2d(F.pad(x, (1, 1, 1, 1), mode="reflect"), kernels_x, groups=x.shape[1])
-    gy = F.conv2d(F.pad(x, (1, 1, 1, 1), mode="reflect"), kernels_y, groups=x.shape[1])
+    c = x.shape[1]
+    kx = _SOBEL_X.to(dtype=x.dtype, device=x.device).repeat(c, 1, 1, 1)
+    ky = _SOBEL_Y.to(dtype=x.dtype, device=x.device).repeat(c, 1, 1, 1)
+    gx = F.conv2d(F.pad(x, (1, 1, 1, 1), mode="reflect"), kx, groups=c)
+    gy = F.conv2d(F.pad(x, (1, 1, 1, 1), mode="reflect"), ky, groups=c)
     return gx, gy
 
 

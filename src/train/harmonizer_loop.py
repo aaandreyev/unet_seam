@@ -84,8 +84,11 @@ def run_harmonizer_epoch(
                 **batch,
                 **rebuilt,
             }
-        if device.type == "cuda" and "input" in batch:
-            batch = {**batch, "input": batch["input"].to(memory_format=torch.channels_last)}
+        if device.type == "cuda":
+            batch = {
+                k: v.to(memory_format=torch.channels_last) if isinstance(v, torch.Tensor) and v.ndim == 4 else v
+                for k, v in batch.items()
+            }
         ctx = torch.inference_mode() if not train_mode else contextlib.nullcontext()
         with ctx:
             if amp_ctx_factory is not None:

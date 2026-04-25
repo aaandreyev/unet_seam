@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import functools
+
 import torch
 from torch import nn
 import torch.nn.functional as F
+
+
+@functools.lru_cache(maxsize=8)
+def _gaussian_kernel_1d(sigma: float, radius: int) -> torch.Tensor:
+    xs = torch.arange(-radius, radius + 1, dtype=torch.float32)
+    kernel = torch.exp(-(xs**2) / (2 * sigma * sigma))
+    return kernel / kernel.sum()
 
 
 def gaussian_blur_tensor(x: torch.Tensor, sigma: float) -> torch.Tensor:
@@ -10,13 +19,12 @@ def gaussian_blur_tensor(x: torch.Tensor, sigma: float) -> torch.Tensor:
         return x
     radius = max(1, int(round(sigma * 3)))
     radius = min(radius, max(1, x.shape[-1] // 2 - 1), max(1, x.shape[-2] // 2 - 1))
-    xs = torch.arange(-radius, radius + 1, device=x.device, dtype=x.dtype)
-    kernel = torch.exp(-(xs**2) / (2 * sigma * sigma))
-    kernel = kernel / kernel.sum()
-    kernel_x = kernel.view(1, 1, 1, -1).repeat(x.shape[1], 1, 1, 1)
-    kernel_y = kernel.view(1, 1, -1, 1).repeat(x.shape[1], 1, 1, 1)
-    x = F.conv2d(F.pad(x, (radius, radius, 0, 0), mode="reflect"), kernel_x, groups=x.shape[1])
-    x = F.conv2d(F.pad(x, (0, 0, radius, radius), mode="reflect"), kernel_y, groups=x.shape[1])
+    kernel = _gaussian_kernel_1d(sigma, radius).to(dtype=x.dtype, device=x.device)
+    c = x.shape[1]
+    kernel_x = kernel.view(1, 1, 1, -1).repeat(c, 1, 1, 1)
+    kernel_y = kernel.view(1, 1, -1, 1).repeat(c, 1, 1, 1)
+    x = F.conv2d(F.pad(x, (radius, radius, 0, 0), mode="reflect"), kernel_x, groups=c)
+    x = F.conv2d(F.pad(x, (0, 0, radius, radius), mode="reflect"), kernel_y, groups=c)
     return x
 
 
