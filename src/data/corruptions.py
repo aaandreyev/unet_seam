@@ -76,13 +76,40 @@ def _pick_unique(pool: list[str], chosen: list[str], generator: torch.Generator)
             return name
 
 
+def _pick_weighted_unique(
+    pool: list[str], weights: list[float], chosen: list[str], generator: torch.Generator
+) -> str:
+    weight_t = torch.tensor(weights, dtype=torch.float32)
+    while True:
+        idx = int(torch.multinomial(weight_t, 1, generator=generator).item())
+        name = pool[idx]
+        if name not in chosen:
+            return name
+
+
 def apply_random_corruptions(inner: torch.Tensor, generator: torch.Generator) -> CorruptionResult:
     x = inner.clone()
     ops: list[str] = []
     n_ops = int(torch.multinomial(torch.tensor([0.2, 0.4, 0.3, 0.1]), 1, generator=generator).item()) + 2
     chosen = [_pick_unique(GROUPS["A"] + GROUPS["B"], [], generator)]
-    _maybe_add(chosen, GROUPS["C"], 0.35, generator)
-    _maybe_add(chosen, GROUPS["D"], 0.25, generator)
+    if torch.rand(1, generator=generator).item() < 0.5:
+        chosen.append(
+            _pick_weighted_unique(
+                GROUPS["C"],
+                [0.10, 0.08, 0.24, 0.32, 0.26],
+                chosen,
+                generator,
+            )
+        )
+    if torch.rand(1, generator=generator).item() < 0.20:
+        chosen.append(
+            _pick_weighted_unique(
+                GROUPS["D"],
+                [0.28, 0.18, 0.18, 0.36],
+                chosen,
+                generator,
+            )
+        )
     candidates = GROUPS["A"] + GROUPS["B"]
     while len(chosen) < n_ops:
         chosen.append(_pick_unique(candidates, chosen, generator))

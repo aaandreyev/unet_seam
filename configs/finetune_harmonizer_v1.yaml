@@ -1,14 +1,11 @@
 seed: 43
 dataset:
   source_manifest: manifests/input_raw_manifest.jsonl
-  real_manifest: manifests/real_paired_strips_manifest.jsonl
-  real_batch_ratio: 0.8
-  structural_threshold: 0.6
-  strips_per_image: 5
+  strips_per_image: 60
   strip_height: 1024
   outer_width: 128
   inner_width: 128
-  seam_jitter_px: 0
+  seam_jitter_px: 6
   boundary_band_px: 24
 model:
   architecture: seam_harmonizer_v3
@@ -18,33 +15,34 @@ model:
 loss:
   low_sigma: 5.0
   weights:
-    rec: 1.0
-    seam: 1.25
-    low: 1.0
-    grad: 0.4
-    chroma: 0.35
-    stats: 0.2
-    gate: 0.02
-    field: 0.05
-    detail: 0.05
-    matrix: 0.05
+    rec: 0.8
+    seam: 1.1
+    low: 1.2
+    grad: 0.25
+    chroma: 0.6
+    stats: 0.35
+    lab: 0.4
+    gate: 0.04
+    field: 0.1
+    detail: 0.1
+    matrix: 0.1
 train:
   seed: 43
-  lr: 1.0e-4
+  lr: 7.0e-5
   weight_decay: 1.0e-4
   betas: [0.9, 0.99]
   precision: bf16
-  batch_size: 64
-  val_batch_size: 64
-  num_epochs: 8
+  batch_size: 32
+  val_batch_size: 32
+  num_epochs: 10
   num_workers: 4
 scheduler:
-  warmup_steps: 500
-  min_lr_scale: 0.01
+  warmup_steps: 100
+  min_lr_scale: 0.15
 ema:
   decay: 0.999
 logging:
   tensorboard: true
-  log_dir: outputs/logs/tensorboard_harmonizer_finetune
+  log_dir: outputs/logs/tensorboard_harmonizer_stage2
   log_interval: 20
   console_log_interval: 25

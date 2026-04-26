@@ -130,7 +130,7 @@ class TestLossAndMetrics:
         with torch.no_grad():
             out = model(batch["input"])
         losses = HarmonizerLossComputer()(out, batch)
-        expected = {"total", "l_rec", "l_seam", "l_low", "l_grad", "l_chroma", "l_stats", "l_gate", "l_field", "l_detail", "l_matrix"}
+        expected = {"total", "l_rec", "l_seam", "l_low", "l_grad", "l_chroma", "l_stats", "l_lab", "l_gate", "l_field", "l_detail", "l_matrix"}
         assert expected.issubset(losses.keys())
 
     def test_metrics_finite(self, model, train_ds, gpu_corruption):

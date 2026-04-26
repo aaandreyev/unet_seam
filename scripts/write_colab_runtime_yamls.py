@@ -18,6 +18,7 @@ def main() -> None:
     ap.add_argument("--train-epochs", type=int, required=True)
     ap.add_argument("--train-num-workers", type=int, required=True)
     ap.add_argument("--primary-checkpoint", type=str, default="best_harmonizer_quality.pt")
+    ap.add_argument("--train-config-name", type=str, default="train_harmonizer_v1.yaml")
     args = ap.parse_args()
     pr: Path = args.project_root
     dr: Path = args.data_root
@@ -27,7 +28,7 @@ def main() -> None:
     local_ckpt = local_outputs / "checkpoints"
     local_eval = local_outputs / "eval_reports"
     local_export = local_outputs / "exports"
-    train_cfg = yaml.safe_load((pr / "configs" / "train_harmonizer_v1.yaml").read_text(encoding="utf-8"))
+    train_cfg = yaml.safe_load((pr / "configs" / args.train_config_name).read_text(encoding="utf-8"))
     eval_cfg = yaml.safe_load((pr / "configs" / "eval_harmonizer_v1.yaml").read_text(encoding="utf-8"))
     export_cfg = yaml.safe_load((pr / "configs" / "export_harmonizer_v1.yaml").read_text(encoding="utf-8"))
     train_cfg["dataset"]["source_manifest"] = str(dr / "manifests" / "input_raw_manifest.jsonl")

@@ -51,9 +51,19 @@ def _quality(metrics: dict[str, float]) -> float:
     de = metrics.get("boundary_ciede2000_16", float("inf"))
     base = metrics.get("baseline_boundary_ciede2000_16", de)
     mae = metrics.get("boundary_mae_16", 1.0)
+    base_mae = metrics.get("baseline_boundary_mae_16", mae)
     low = metrics.get("lowfreq_mae", 1.0)
-    no_improve = max(de - base, 0.0) * 2.0
-    return de + 200.0 * mae + 50.0 * low + no_improve
+    rel_de = max((1.0 - de / max(base, 1e-6)) * 100.0, 0.0)
+    rel_mae = max((1.0 - mae / max(base_mae, 1e-6)) * 100.0, 0.0)
+    de_gate_deficit = max(40.0 - rel_de, 0.0)
+    mae_gate_deficit = max(50.0 - rel_mae, 0.0)
+    return (
+        1.8 * de
+        + 170.0 * mae
+        + 60.0 * low
+        + 0.6 * de_gate_deficit
+        + 0.2 * mae_gate_deficit
+    )
 
 
 def _raw_model(module: torch.nn.Module) -> torch.nn.Module:

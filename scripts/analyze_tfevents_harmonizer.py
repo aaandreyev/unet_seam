@@ -19,16 +19,17 @@ from typing import Any
 
 # Default loss weights (HarmonizerLossComputer) for contribution estimates
 _DEFAULT_LOSS_WEIGHTS: dict[str, float] = {
-    "rec": 1.0,
-    "seam": 1.5,
-    "low": 1.0,
-    "grad": 0.35,
-    "chroma": 0.25,
-    "stats": 0.15,
-    "gate": 0.02,
-    "field": 0.05,
-    "detail": 0.05,
-    "matrix": 0.05,
+    "rec": 0.8,
+    "seam": 1.1,
+    "low": 1.2,
+    "grad": 0.25,
+    "chroma": 0.6,
+    "stats": 0.35,
+    "lab": 0.4,
+    "gate": 0.04,
+    "field": 0.10,
+    "detail": 0.10,
+    "matrix": 0.10,
 }
 
 
@@ -106,6 +107,7 @@ def _table_val_epochs(
             "l_grad",
             "l_chroma",
             "l_stats",
+            "l_lab",
             "l_gate",
             "l_field",
             "l_detail",
@@ -176,6 +178,7 @@ def _weighted_loss_breakdown_at_step(
         "l_grad": "grad",
         "l_chroma": "chroma",
         "l_stats": "stats",
+        "l_lab": "lab",
         "l_gate": "gate",
         "l_field": "field",
         "l_detail": "detail",

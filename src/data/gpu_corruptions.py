@@ -30,14 +30,15 @@ class GPUCorruption(nn.Module):
 
     Aligns with CPU `apply_random_corruptions`:
     - Photometric: each op is included independently with its own p (mild A/B-style stack).
-    - Family C: at most *one* spatial op per sample, with probability ~0.35 (matches _maybe_add C).
-    - Family D: at most *one* of blur / microcontrast / noise / jpeg per sample, p ~0.25.
+    - Family C: at most *one* spatial op per sample, with probability ~0.50 and
+      weighted toward color-drift / illumination fields.
+    - Family D: at most *one* of blur / microcontrast / noise / jpeg per sample, p ~0.20.
 
     The previous version gated C and D on a single batch-wide coin flip and stacked multiple
     C (or blur+noise) on one sample, which made GPU corruption much heavier than the dataset.
     """
 
-    def __init__(self, p_c: float = 0.35, p_d: float = 0.25) -> None:
+    def __init__(self, p_c: float = 0.5, p_d: float = 0.2) -> None:
         super().__init__()
         self.p_c = p_c
         self.p_d = p_d
@@ -115,7 +116,12 @@ class GPUCorruption(nn.Module):
 
         # ── Family C: at most one spatial op per sample (p ≈ 0.35) ──────────────
         m_c = (torch.rand(B, 1, 1, 1, device=dev, generator=gen) < self.p_c).float()
-        choice_c = (torch.rand(B, device=dev, generator=gen) * 5.0).long().clamp(0, 4)
+        choice_c = torch.multinomial(
+            torch.tensor([0.10, 0.08, 0.24, 0.32, 0.26], device=dev, dtype=torch.float32),
+            B,
+            replacement=True,
+            generator=gen,
+        )
         # unsqueeze(1): (B,1,1,1,1) so (B,1,1,1,1) * (B,5,1,1,1) broadcasts on class dim, not batch
         m_k = m_c.unsqueeze(1) * (F.one_hot(choice_c, 5).view(B, 5, 1, 1, 1).float())
 
@@ -157,7 +163,12 @@ class GPUCorruption(nn.Module):
 
         # ── Family D: at most one of blur / microcontrast / noise / jpeg (p ≈ 0.25) ─
         m_d = (torch.rand(B, 1, 1, 1, device=dev, generator=gen) < self.p_d).float()
-        choice_d = (torch.rand(B, device=dev, generator=gen) * 4.0).long().clamp(0, 3)
+        choice_d = torch.multinomial(
+            torch.tensor([0.28, 0.18, 0.18, 0.36], device=dev, dtype=torch.float32),
+            B,
+            replacement=True,
+            generator=gen,
+        )
         m_dk = m_d.unsqueeze(1) * (F.one_hot(choice_d, 4).view(B, 4, 1, 1, 1).float())
 
         # d=0 Gaussian blur

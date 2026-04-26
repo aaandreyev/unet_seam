@@ -13,6 +13,7 @@ from src.infer.correct_full_frame import _structural_strength_scale
 from src.losses.harmonizer_losses import HarmonizerLossComputer
 from src.models.harmonizer import SeamHarmonizerV3
 from src.models.harmonizer_blocks import NAFBlockLite
+from scripts.train_harmonizer import _quality
 from scripts.export_harmonizer_safetensors import _validate_checkpoint_for_export
 
 
@@ -39,16 +40,17 @@ def test_spec_input_channels_mask_distance_and_aux_maps():
 def test_spec_loss_weights():
     loss = HarmonizerLossComputer()
     assert loss.weights == {
-        "rec": 1.0,
-        "seam": 1.5,
-        "low": 1.0,
-        "grad": 0.35,
-        "chroma": 0.25,
-        "stats": 0.15,
-        "gate": 0.02,
-        "field": 0.05,
-        "detail": 0.05,
-        "matrix": 0.05,
+        "rec": 0.8,
+        "seam": 1.1,
+        "low": 1.2,
+        "grad": 0.25,
+        "chroma": 0.6,
+        "stats": 0.35,
+        "lab": 0.4,
+        "gate": 0.04,
+        "field": 0.10,
+        "detail": 0.10,
+        "matrix": 0.10,
     }
 
 
@@ -70,8 +72,8 @@ def test_spec_synthetic_corruption_families_and_probabilities():
         assert any(op in GROUPS["A"] + GROUPS["B"] for op in result.ops)
         c_hits += int(any(op in GROUPS["C"] for op in result.ops))
         d_hits += int(any(op in GROUPS["D"] for op in result.ops))
-    assert 0.20 <= c_hits / 200.0 <= 0.50
-    assert 0.12 <= d_hits / 200.0 <= 0.40
+    assert 0.35 <= c_hits / 200.0 <= 0.65
+    assert 0.08 <= d_hits / 200.0 <= 0.32
 
 
 def test_spec_synthetic_dataset_builds_v3_input(tmp_path: Path):
@@ -114,3 +116,21 @@ def test_spec_export_rejects_incompatible_checkpoint():
     except RuntimeError:
         return
     raise AssertionError("incompatible checkpoint must be rejected by export validation")
+
+
+def test_quality_prioritizes_deltae_and_gate_deficits():
+    better_deltae = {
+        "boundary_ciede2000_16": 2.75,
+        "baseline_boundary_ciede2000_16": 4.0,
+        "boundary_mae_16": 0.0170,
+        "baseline_boundary_mae_16": 0.036,
+        "lowfreq_mae": 0.0175,
+    }
+    worse_deltae = {
+        "boundary_ciede2000_16": 2.90,
+        "baseline_boundary_ciede2000_16": 4.0,
+        "boundary_mae_16": 0.0167,
+        "baseline_boundary_mae_16": 0.036,
+        "lowfreq_mae": 0.0173,
+    }
+    assert _quality(better_deltae) < _quality(worse_deltae)
