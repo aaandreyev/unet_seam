@@ -56,7 +56,12 @@ def _quality(metrics: dict[str, float]) -> float:
     return de + 200.0 * mae + 50.0 * low + no_improve
 
 
+def _raw_model(module: torch.nn.Module) -> torch.nn.Module:
+    return getattr(module, "_orig_mod", module)
+
+
 def _load_matching_state(module: torch.nn.Module, state_dict: dict[str, torch.Tensor]) -> dict[str, int]:
+    module = _raw_model(module)
     current = module.state_dict()
     matched = {
         key: value
@@ -222,7 +227,7 @@ def main() -> None:
     best_quality = float("inf")
     if args.resume:
         state = load_checkpoint(Path(args.resume), map_location=device.type)
-        model.load_state_dict(state["model"])
+        _raw_model(model).load_state_dict(state["model"])
         ema.load_state_dict(state["ema"])
         optimizer.load_state_dict(state["optimizer"])
         if state.get("scheduler") is not None:

@@ -48,8 +48,8 @@ def apply_corrector_to_full_frame(
     strength: float = 1.0,
     structural_gate: bool = True,
 ) -> tuple[torch.Tensor, dict]:
-    if strength < 0.0 or strength > 1.0:
-        raise RuntimeError("strength must be in [0, 1]")
+    if strength < 0.0 or strength > 10.0:
+        raise RuntimeError("strength must be in [0, 10]")
     outputs = extract_active_strips(image[0], bbox, sides, inner_width)
     side_deltas: dict[str, torch.Tensor] = {}
     debug = {"per_side": {}}

@@ -19,13 +19,14 @@ from src.infer.correct_full_frame import apply_corrector_to_full_frame
 class SeamHarmonizerV3Node:
     @classmethod
     def INPUT_TYPES(cls):
+        default_model = str((Path(__file__).resolve().parents[1] / "outputs/exports/seam_harmonizer_v3.safetensors"))
         return {
             "required": {
                 "IMAGE": ("IMAGE",),
                 "MASK": ("MASK",),
-                "model_path": ("STRING", {"default": "outputs/exports/seam_harmonizer_v3.safetensors"}),
+                "model_path": ("STRING", {"default": default_model}),
                 "inner_width": ("INT", {"default": 128}),
-                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
                 "process_left": ("BOOLEAN", {"default": True}),
                 "process_right": ("BOOLEAN", {"default": True}),
                 "process_top": ("BOOLEAN", {"default": True}),

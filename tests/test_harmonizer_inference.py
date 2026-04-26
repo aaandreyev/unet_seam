@@ -54,3 +54,12 @@ def test_harmonizer_full_frame_keeps_outside_mask_exact():
     out, debug = apply_corrector_to_full_frame(AddInnerModel(), image, mask, bbox, ["left", "right", "top", "bottom"], 128, strength=1.0)
     assert debug["architecture"] == "seam_harmonizer_v3"
     assert torch.equal(out * (1.0 - mask), image * (1.0 - mask))
+
+
+def test_harmonizer_accepts_strength_above_one():
+    image = torch.rand(1, 3, 512, 512)
+    mask = torch.zeros(1, 1, 512, 512)
+    mask[:, :, 128:384, 128:384] = 1.0
+    bbox = (128, 128, 384, 384)
+    out, _ = apply_corrector_to_full_frame(AddInnerModel(), image, mask, bbox, ["left", "right"], 128, strength=5.0)
+    assert out.shape == image.shape
