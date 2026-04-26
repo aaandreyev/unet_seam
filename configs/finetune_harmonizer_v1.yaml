@@ -16,15 +16,15 @@ loss:
   low_sigma: 5.0
   weights:
     rec: 0.8
-    seam: 1.1
+    seam: 1.5
     low: 1.2
     grad: 0.25
-    chroma: 0.6
+    chroma: 0.7
     stats: 0.35
-    lab: 0.4
-    gate: 0.04
+    lab: 0.8
+    gate: 0.03
     field: 0.1
-    detail: 0.1
+    detail: 0.08
     matrix: 0.1
 train:
   seed: 43
@@ -32,9 +32,9 @@ train:
   weight_decay: 1.0e-4
   betas: [0.9, 0.99]
   precision: bf16
-  batch_size: 16
-  val_batch_size: 16
-  num_epochs: 10
+  batch_size: 48
+  val_batch_size: 64
+  num_epochs: 20
   num_workers: 4
   compile: false
 scheduler:
