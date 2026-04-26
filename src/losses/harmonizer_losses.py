@@ -81,16 +81,16 @@ class HarmonizerLossComputer:
         self.low_sigma = low_sigma
         default_weights = {
             "rec": 0.8,
-            "seam": 1.1,
+            "seam": 1.5,
             "low": 1.2,
             "grad": 0.25,
-            "chroma": 0.6,
+            "chroma": 0.7,
             "stats": 0.35,
-            "gate": 0.04,
+            "gate": 0.03,
             "field": 0.10,
-            "detail": 0.10,
+            "detail": 0.08,
             "matrix": 0.10,
-            "lab": 0.40,
+            "lab": 0.80,
         }
         self.weights = default_weights | (weights or {})
 
@@ -141,11 +141,11 @@ class HarmonizerLossComputer:
         lab_low_target = gaussian_blur_tensor(lab_target, self.low_sigma)
         lab_err = (lab_pred - lab_target).abs().mean(dim=1, keepdim=True)
         l_lab = 0.65 * _masked_mean(lab_err, seam_weight) + 0.35 * (lab_low_pred - lab_low_target).abs().mean()
-        l_gate = (
-            0.5 * _masked_mean(outputs["confidence"], boundary)
-            + 1.5 * _masked_mean_or_zero(outputs["confidence"], outside_boundary)
-            + 0.25 * tv_loss(outputs["confidence"])
-        )
+        # Only penalise high confidence FAR from the seam (outside boundary band).
+        # Near-seam confidence should be free — that's exactly where corrections matter.
+        # TV term removed: it was contributing ~60% of gate loss and suppressing
+        # spatially-varying confidence that the model needs for local adaptation.
+        l_gate = 1.5 * _masked_mean_or_zero(outputs["confidence"], outside_boundary)
         l_field = (
             tv_loss(outputs["gain_lowres"])
             + tv_loss(outputs["gamma_lowres"])

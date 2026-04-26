@@ -80,19 +80,19 @@ class GPUCorruption(nn.Module):
         # Gamma
         x = apply(x, x.clamp(1e-7, 1).pow(rand(0.5, 2.0)), p=0.30)
 
-        # Per-channel gain (color cast)
-        gains = torch.rand(B, 3, 1, 1, device=dev, generator=gen) * (1.2 - 0.8) + 0.8
-        x = apply(x, (x * gains).clamp(0, 1), p=0.35)
+        # Per-channel gain (color cast) — widened to 0.75–1.28
+        gains = torch.rand(B, 3, 1, 1, device=dev, generator=gen) * (1.28 - 0.75) + 0.75
+        x = apply(x, (x * gains).clamp(0, 1), p=0.40)
 
-        # Saturation
+        # Saturation — widened to 0.2–1.9
         lum = 0.2126 * x[:, 0:1] + 0.7152 * x[:, 1:2] + 0.0722 * x[:, 2:3]
-        x = apply(x, (lum + (x - lum) * rand(0.3, 1.7)).clamp(0, 1), p=0.30)
+        x = apply(x, (lum + (x - lum) * rand(0.2, 1.9)).clamp(0, 1), p=0.35)
 
-        # Temperature (warm/cool shift)
-        t = rand(-0.10, 0.10)
+        # Temperature (warm/cool shift) — widened to ±0.18 to cover real pipeline shifts
+        t = rand(-0.18, 0.18)
         warm = torch.cat([(x[:, 0:1] + t).clamp(0, 1), x[:, 1:2],
                           (x[:, 2:3] - t).clamp(0, 1)], dim=1)
-        x = apply(x, warm, p=0.30)
+        x = apply(x, warm, p=0.40)
 
         # Black-point lift
         x = apply(x, (x + rand(0.0, 0.10) * (1 - x)).clamp(0, 1), p=0.25)

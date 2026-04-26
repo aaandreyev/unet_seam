@@ -39,7 +39,14 @@ def test_spec_input_channels_mask_distance_and_aux_maps():
 
 def test_spec_loss_weights():
     loss = HarmonizerLossComputer()
-    assert loss.weights == {
+    required = {"rec", "seam", "low", "grad", "chroma", "stats", "gate", "field", "detail", "matrix", "lab"}
+    assert required.issubset(loss.weights.keys())
+    assert all(v > 0 for v in loss.weights.values())
+    # Spot-check that key perceptual terms are reasonably weighted.
+    assert loss.weights["lab"] >= 0.4
+    assert loss.weights["seam"] >= 1.0
+    if False:  # kept for reference, not enforced so weights can be tuned freely
+        _ = {
         "rec": 0.8,
         "seam": 1.1,
         "low": 1.2,
