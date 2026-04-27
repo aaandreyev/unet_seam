@@ -92,7 +92,10 @@ def _confidence_target_map(
     sigma: float,
 ) -> torch.Tensor:
     delta = gaussian_blur_tensor((target - input_inner).abs(), sigma).mean(dim=1, keepdim=True)
-    norm = torch.quantile(delta.flatten(start_dim=1), 0.85, dim=1, keepdim=True).view(-1, 1, 1, 1).clamp_min(0.03)
+    # torch.quantile on CUDA requires float32/float64; bf16/fp16 training hits this path in Colab.
+    delta_quant = delta.float() if delta.dtype not in (torch.float32, torch.float64) else delta
+    norm = torch.quantile(delta_quant.flatten(start_dim=1), 0.85, dim=1, keepdim=True).view(-1, 1, 1, 1).clamp_min(0.03)
+    norm = norm.to(device=delta.device, dtype=delta.dtype)
     target_conf = (delta / norm).clamp(0.0, 1.0)
     return torch.maximum(target_conf, 0.15 * seam_weight)
 
