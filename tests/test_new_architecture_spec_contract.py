@@ -39,12 +39,13 @@ def test_spec_input_channels_mask_distance_and_aux_maps():
 
 def test_spec_loss_weights():
     loss = HarmonizerLossComputer()
-    required = {"rec", "seam", "low", "grad", "chroma", "stats", "gate", "field", "detail", "matrix", "lab"}
+    required = {"rec", "seam", "low", "grad", "chroma", "stats", "gate", "field", "detail", "matrix", "lab", "profile", "conf_align", "overcorr"}
     assert required.issubset(loss.weights.keys())
     assert all(v > 0 for v in loss.weights.values())
     # Spot-check that key perceptual terms are reasonably weighted.
     assert loss.weights["lab"] >= 0.4
     assert loss.weights["seam"] >= 1.0
+    assert loss.weights["profile"] >= 0.3
     if False:  # kept for reference, not enforced so weights can be tuned freely
         _ = {
         "rec": 0.8,
@@ -141,3 +142,31 @@ def test_quality_prioritizes_deltae_and_gate_deficits():
         "lowfreq_mae": 0.0173,
     }
     assert _quality(better_deltae) < _quality(worse_deltae)
+
+
+def test_quality_penalizes_visual_risk_even_when_strip_metrics_are_close():
+    safer = {
+        "boundary_ciede2000_16": 2.60,
+        "baseline_boundary_ciede2000_16": 4.1,
+        "boundary_mae_16": 0.0178,
+        "baseline_boundary_mae_16": 0.036,
+        "lowfreq_mae": 0.0180,
+        "delta_luma_profile_mae": 0.0060,
+        "delta_chroma_profile_mae": 0.0040,
+        "overcorrection_mae": 0.0010,
+        "confidence_mean": 0.18,
+        "confidence_alignment_mae": 0.11,
+        "detail_abs_mean": 0.0030,
+        "gain_abs_log_mean": 0.032,
+    }
+    riskier = dict(safer)
+    riskier.update(
+        {
+            "delta_luma_profile_mae": 0.015,
+            "overcorrection_mae": 0.005,
+            "confidence_mean": 0.31,
+            "detail_abs_mean": 0.0075,
+            "gain_abs_log_mean": 0.08,
+        }
+    )
+    assert _quality(safer) < _quality(riskier)

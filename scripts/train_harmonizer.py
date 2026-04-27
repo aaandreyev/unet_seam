@@ -53,15 +53,32 @@ def _quality(metrics: dict[str, float]) -> float:
     mae = metrics.get("boundary_mae_16", 1.0)
     base_mae = metrics.get("baseline_boundary_mae_16", mae)
     low = metrics.get("lowfreq_mae", 1.0)
+    delta_luma_profile = metrics.get("delta_luma_profile_mae", 1.0)
+    delta_chroma_profile = metrics.get("delta_chroma_profile_mae", 1.0)
+    overcorr = metrics.get("overcorrection_mae", 1.0)
+    conf_mean = metrics.get("confidence_mean", 0.0)
+    conf_align = metrics.get("confidence_alignment_mae", 0.0)
+    detail_abs = metrics.get("detail_abs_mean", 0.0)
+    gain_abs = metrics.get("gain_abs_log_mean", 0.0)
     rel_de = max((1.0 - de / max(base, 1e-6)) * 100.0, 0.0)
     rel_mae = max((1.0 - mae / max(base_mae, 1e-6)) * 100.0, 0.0)
     de_gate_deficit = max(40.0 - rel_de, 0.0)
     mae_gate_deficit = max(50.0 - rel_mae, 0.0)
+    conf_excess = max(conf_mean - 0.22, 0.0)
+    detail_excess = max(detail_abs - 0.0045, 0.0)
+    gain_excess = max(gain_abs - 0.05, 0.0)
     return (
-        1.8 * de
+        2.2 * de
         + 170.0 * mae
-        + 60.0 * low
-        + 0.6 * de_gate_deficit
+        + 85.0 * low
+        + 95.0 * delta_luma_profile
+        + 60.0 * delta_chroma_profile
+        + 120.0 * overcorr
+        + 12.0 * conf_align
+        + 55.0 * conf_excess
+        + 180.0 * detail_excess
+        + 75.0 * gain_excess
+        + 0.8 * de_gate_deficit
         + 0.2 * mae_gate_deficit
     )
 

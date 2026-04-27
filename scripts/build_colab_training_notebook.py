@@ -35,7 +35,7 @@ def build_notebook() -> dict:
             "import os\n\n"
             "DATASET_BUNDLE_DRIVE_PATH = '/content/drive/MyDrive/unet_seam/seam_harmonizer_training_bundle.tar.gz'\n"
             "DRIVE_RUNS_DIR = '/content/drive/MyDrive/unet_seam_runs'\n"
-            "RUN_NAME = 'seam_harmonizer_v3_stage2_run001'\n"
+            "RUN_NAME = 'seam_harmonizer_v3_stage3_run001'\n"
             "LOAD_WEIGHTS_RUN_NAME = 'seam_harmonizer_v3_run001'\n"
             "REPO_CLONE_URL = 'https://github.com/aaandreyev/unet_seam.git'\n"
             "REPO_CLONE_REF = 'main'\n"

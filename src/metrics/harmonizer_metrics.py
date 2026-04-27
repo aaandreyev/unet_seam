@@ -27,6 +27,16 @@ def _grad_mae_mean(pred: torch.Tensor, target: torch.Tensor) -> float:
     return (dxp - dxt).abs().mean().item() + (dyp - dyt).abs().mean().item()
 
 
+def _luma(x: torch.Tensor) -> torch.Tensor:
+    return 0.2126 * x[:, 0:1] + 0.7152 * x[:, 1:2] + 0.0722 * x[:, 2:3]
+
+
+def _row_profile_mae(pred: torch.Tensor, target: torch.Tensor) -> float:
+    row_pred = pred.mean(dim=-1)
+    row_target = target.mean(dim=-1)
+    return (row_pred - row_target).abs().mean().item()
+
+
 def _extract_aux(outputs_or_curves, shading: torch.Tensor | None) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
     if isinstance(outputs_or_curves, dict):
         confidence = outputs_or_curves.get("confidence")
@@ -45,6 +55,10 @@ def _harmonizer_metrics_torch(
 ) -> dict[str, float]:
     low_pred = gaussian_blur_tensor(pred_inner, 5.0)
     low_target = gaussian_blur_tensor(target_inner, 5.0)
+    delta_pred = pred_inner - input_inner
+    delta_target = target_inner - input_inner
+    low_delta_pred = gaussian_blur_tensor(delta_pred, 7.0)
+    low_delta_target = gaussian_blur_tensor(delta_target, 7.0)
     confidence, detail, gain = _extract_aux(outputs_or_curves, shading)
     out = {
         "boundary_mae_8": _mae_band_mean(pred_inner, target_inner, 8),
@@ -53,9 +67,14 @@ def _harmonizer_metrics_torch(
         "baseline_boundary_mae_16": _mae_band_mean(input_inner, target_inner, 16),
         "lowfreq_mae": (low_pred - low_target).abs().mean().item(),
         "gradient_mae": _grad_mae_mean(pred_inner, target_inner),
+        "delta_luma_profile_mae": _row_profile_mae(_luma(low_delta_pred), _luma(low_delta_target)),
+        "delta_chroma_profile_mae": _row_profile_mae(low_delta_pred[:, 0:1] - low_delta_pred[:, 1:2], low_delta_target[:, 0:1] - low_delta_target[:, 1:2]),
+        "overcorrection_mae": (low_delta_pred.abs() - low_delta_target.abs()).clamp_min(0.0).mean().item(),
     }
     if confidence is not None:
         out["confidence_mean"] = confidence.mean().item()
+        target_conf = ((target_inner - input_inner).abs().mean(dim=1, keepdim=True) / 0.08).clamp(0.0, 1.0)
+        out["confidence_alignment_mae"] = (confidence - target_conf).abs().mean().item()
     if detail is not None:
         out["detail_abs_mean"] = detail.abs().mean().item()
     if gain is not None:

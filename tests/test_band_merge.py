@@ -25,3 +25,18 @@ def test_corner_fusion_does_not_amplify_delta():
     }
     merged, _ = merge_side_deltas(side_deltas, mask)
     assert float(merged.abs().max()) <= 0.2 + 1e-6
+
+
+def test_confidence_weighting_prefers_higher_confidence_side():
+    mask = torch.ones(1, 1, 8, 8)
+    side_deltas = {
+        "left": torch.full((1, 3, 8, 8), 0.2),
+        "top": torch.full((1, 3, 8, 8), 0.1),
+    }
+    side_confidences = {
+        "left": torch.full((1, 1, 8, 8), 0.9),
+        "top": torch.full((1, 1, 8, 8), 0.1),
+    }
+    merged, weights = merge_side_deltas(side_deltas, mask, side_confidences=side_confidences)
+    assert float(weights["left"][..., 0, 0]) > float(weights["top"][..., 0, 0])
+    assert float(merged[..., 0, 0].mean()) > 0.15

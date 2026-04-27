@@ -44,6 +44,59 @@ def _color_opponent(x: torch.Tensor) -> torch.Tensor:
     return torch.cat([rg, yb], dim=1)
 
 
+def _luma(x: torch.Tensor) -> torch.Tensor:
+    return 0.2126 * x[:, 0:1] + 0.7152 * x[:, 1:2] + 0.0722 * x[:, 2:3]
+
+
+def _safe_masked_average_hw(x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    num = (x * mask).sum(dim=-1)
+    den = mask.sum(dim=-1).clamp_min(1e-6)
+    return num / den
+
+
+def _profile_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    input_inner: torch.Tensor,
+    seam_weight: torch.Tensor,
+    *,
+    sigma: float,
+) -> torch.Tensor:
+    delta_pred = pred - input_inner
+    delta_target = target - input_inner
+    seam_blur_pred = gaussian_blur_tensor(delta_pred, sigma)
+    seam_blur_target = gaussian_blur_tensor(delta_target, sigma)
+    seam_luma_pred = _luma(seam_blur_pred)
+    seam_luma_target = _luma(seam_blur_target)
+    seam_chr_pred = _color_opponent(seam_blur_pred)
+    seam_chr_target = _color_opponent(seam_blur_target)
+    row_luma_pred = _safe_masked_average_hw(seam_luma_pred, seam_weight)
+    row_luma_target = _safe_masked_average_hw(seam_luma_target, seam_weight)
+    row_chr_pred = _safe_masked_average_hw(seam_chr_pred.abs().mean(dim=1, keepdim=True), seam_weight)
+    row_chr_target = _safe_masked_average_hw(seam_chr_target.abs().mean(dim=1, keepdim=True), seam_weight)
+    row_loss = (row_luma_pred - row_luma_target).abs().mean() + 0.7 * (row_chr_pred - row_chr_target).abs().mean()
+
+    dy_luma_pred = row_luma_pred[..., 1:] - row_luma_pred[..., :-1]
+    dy_luma_target = row_luma_target[..., 1:] - row_luma_target[..., :-1]
+    dy_chr_pred = row_chr_pred[..., 1:] - row_chr_pred[..., :-1]
+    dy_chr_target = row_chr_target[..., 1:] - row_chr_target[..., :-1]
+    grad_loss = (dy_luma_pred - dy_luma_target).abs().mean() + 0.7 * (dy_chr_pred - dy_chr_target).abs().mean()
+    return row_loss + 0.5 * grad_loss
+
+
+def _confidence_target_map(
+    input_inner: torch.Tensor,
+    target: torch.Tensor,
+    seam_weight: torch.Tensor,
+    *,
+    sigma: float,
+) -> torch.Tensor:
+    delta = gaussian_blur_tensor((target - input_inner).abs(), sigma).mean(dim=1, keepdim=True)
+    norm = torch.quantile(delta.flatten(start_dim=1), 0.85, dim=1, keepdim=True).view(-1, 1, 1, 1).clamp_min(0.03)
+    target_conf = (delta / norm).clamp(0.0, 1.0)
+    return torch.maximum(target_conf, 0.15 * seam_weight)
+
+
 def _srgb_to_linear(x: torch.Tensor) -> torch.Tensor:
     return torch.where(x <= 0.04045, x / 12.92, ((x + 0.055) / 1.055).clamp_min(1e-6).pow(2.4))
 
@@ -81,7 +134,7 @@ class HarmonizerLossComputer:
         self.low_sigma = low_sigma
         default_weights = {
             "rec": 0.8,
-            "seam": 1.5,
+            "seam": 1.3,
             "low": 1.2,
             "grad": 0.25,
             "chroma": 0.7,
@@ -91,6 +144,9 @@ class HarmonizerLossComputer:
             "detail": 0.08,
             "matrix": 0.10,
             "lab": 0.80,
+            "profile": 0.55,
+            "conf_align": 0.18,
+            "overcorr": 0.22,
         }
         self.weights = default_weights | (weights or {})
 
@@ -104,8 +160,14 @@ class HarmonizerLossComputer:
             target_strip = batch_or_target
             boundary = torch.ones_like(target_strip[:, :1, :, self.outer_width:])
             decay = boundary
+            input_strip = target_strip
         pred = outputs["corrected_inner"]
         target = _inner(target_strip, self.outer_width)
+        if isinstance(batch_or_target, dict):
+            source_strip = batch.get("input_rgb", target_strip)
+            input_inner = _inner(source_strip, self.outer_width)
+        else:
+            input_inner = _inner(input_strip, self.outer_width)
         full_mask = torch.ones_like(boundary)
         inner_weight = (0.15 + 0.85 * decay).clamp(0.0, 1.0)
         outside_boundary = (1.0 - boundary).clamp(0.0, 1.0)
@@ -141,6 +203,14 @@ class HarmonizerLossComputer:
         lab_low_target = gaussian_blur_tensor(lab_target, self.low_sigma)
         lab_err = (lab_pred - lab_target).abs().mean(dim=1, keepdim=True)
         l_lab = 0.65 * _masked_mean(lab_err, seam_weight) + 0.35 * (lab_low_pred - lab_low_target).abs().mean()
+        l_profile = _profile_loss(pred, target, input_inner, seam_weight, sigma=max(self.low_sigma, 7.0))
+        target_conf = _confidence_target_map(input_inner, target, seam_weight, sigma=max(self.low_sigma, 5.0))
+        conf_err = charbonnier(outputs["confidence"] - target_conf)
+        l_conf_align = 0.8 * _masked_mean(conf_err, seam_weight) + 0.2 * _masked_mean(conf_err, inner_weight)
+        delta_pred_mag = gaussian_blur_tensor((pred - input_inner).abs(), self.low_sigma).mean(dim=1, keepdim=True)
+        delta_target_mag = gaussian_blur_tensor((target - input_inner).abs(), self.low_sigma).mean(dim=1, keepdim=True)
+        overcorr_map = (delta_pred_mag - delta_target_mag).clamp_min(0.0)
+        l_overcorr = 0.75 * _masked_mean(overcorr_map, seam_weight) + 1.0 * _masked_mean_or_zero(overcorr_map, outside_boundary)
         # Only penalise high confidence FAR from the seam (outside boundary band).
         # Near-seam confidence should be free — that's exactly where corrections matter.
         # TV term removed: it was contributing ~60% of gate loss and suppressing
@@ -168,6 +238,9 @@ class HarmonizerLossComputer:
             + w["chroma"] * l_chroma
             + w["stats"] * l_stats
             + w["lab"] * l_lab
+            + w["profile"] * l_profile
+            + w["conf_align"] * l_conf_align
+            + w["overcorr"] * l_overcorr
             + w["gate"] * l_gate
             + w["field"] * l_field
             + w["detail"] * l_detail
@@ -182,6 +255,9 @@ class HarmonizerLossComputer:
             "l_chroma": l_chroma,
             "l_stats": l_stats,
             "l_lab": l_lab,
+            "l_profile": l_profile,
+            "l_conf_align": l_conf_align,
+            "l_overcorr": l_overcorr,
             "l_gate": l_gate,
             "l_field": l_field,
             "l_detail": l_detail,

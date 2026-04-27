@@ -49,6 +49,31 @@ def test_collect_best_rows_keeps_distinct_metric_optima():
     assert "integrated_score_0_95" in best["score"]
 
 
+def test_integrated_score_penalizes_visual_risk_fields():
+    mod = _load_module()
+    safer = {
+        "boundary_mae_16": 0.0175,
+        "baseline_boundary_mae_16": 0.040,
+        "boundary_ciede2000_16": 2.45,
+        "baseline_boundary_ciede2000_16": 4.8,
+        "lowfreq_mae": 0.0185,
+        "confidence_mean": 0.16,
+        "detail_abs_mean": 0.0025,
+        "gain_abs_log_mean": 0.028,
+        "quality_score": 7.0,
+    }
+    riskier = dict(safer)
+    riskier.update(
+        {
+            "confidence_mean": 0.31,
+            "detail_abs_mean": 0.0080,
+            "gain_abs_log_mean": 0.082,
+            "quality_score": 13.0,
+        }
+    )
+    assert mod._integrated_score_0_95(safer) > mod._integrated_score_0_95(riskier)
+
+
 def test_goal_status_clamps_distance_for_degradation():
     mod = _load_module()
     goals = mod._goal_status_from_best(
@@ -62,6 +87,24 @@ def test_goal_status_clamps_distance_for_degradation():
     assert goals
     assert all(0.0 <= goal["distance_pct"] <= 100.0 for goal in goals)
     assert not any(goal["reached"] for goal in goals)
+
+
+def test_goal_status_includes_visual_risk_gates():
+    mod = _load_module()
+    goals = mod._goal_status_from_best(
+        {
+            "boundary_mae_16": 0.019,
+            "baseline_boundary_mae_16": 0.050,
+            "boundary_ciede2000_16": 2.4,
+            "baseline_boundary_ciede2000_16": 4.5,
+            "lowfreq_mae": 0.018,
+            "confidence_mean": 0.28,
+            "detail_abs_mean": 0.0060,
+            "gain_abs_log_mean": 0.061,
+        }
+    )
+    ids = {goal["id"] for goal in goals}
+    assert {"lowfreq", "conf", "detail", "gain"} <= ids
 
 
 def test_build_run_segments_tracks_multiple_event_files(monkeypatch, tmp_path: Path):

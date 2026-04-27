@@ -45,6 +45,33 @@ def _best_row_by_key(
     return fn(rows, key=lambda r: float(r[key]))
 
 
+def _lerp_score_desc(value: float | None, *, good: float, bad: float, points: float) -> float:
+    if value is None or math.isnan(value):
+        return 0.0
+    if bad <= good:
+        return 0.0
+    t = _clamp01((bad - float(value)) / (bad - good))
+    return points * t
+
+
+def _lerp_score_asc(value: float | None, *, bad: float, good: float, points: float) -> float:
+    if value is None or math.isnan(value):
+        return 0.0
+    if good <= bad:
+        return 0.0
+    t = _clamp01((float(value) - bad) / (good - bad))
+    return points * t
+
+
+def _risk_penalty(value: float | None, *, safe: float, risky: float, points: float) -> float:
+    if value is None or math.isnan(value):
+        return 0.0
+    if risky <= safe:
+        return 0.0
+    t = _clamp01((float(value) - safe) / (risky - safe))
+    return points * t
+
+
 def _integrated_score_0_95(r: dict[str, Any] | None) -> float | None:
     if not r:
         return None
@@ -52,19 +79,38 @@ def _integrated_score_0_95(r: dict[str, Any] | None) -> float | None:
     de, bd = r.get("boundary_ciede2000_16"), r.get("baseline_boundary_ciede2000_16")
     if not all(isinstance(x, (int, float)) for x in (bm, bb, de, bd)) or bb <= 0 or bd <= 0:
         return None
+    low = _metric_or_none(r, "lowfreq_mae")
+    conf = _metric_or_none(r, "confidence_mean")
+    detail = _metric_or_none(r, "detail_abs_mean")
+    gain = _metric_or_none(r, "gain_abs_log_mean")
+    legacy_quality = _metric_or_none(r, "quality_score")
+    delta_luma = _metric_or_none(r, "delta_luma_profile_mae")
+    delta_chroma = _metric_or_none(r, "delta_chroma_profile_mae")
+    overcorr = _metric_or_none(r, "overcorrection_mae")
+    conf_align = _metric_or_none(r, "confidence_alignment_mae")
     rel_mae = (1.0 - float(bm) / float(bb)) * 100.0
     rel_de = (1.0 - float(de) / float(bd)) * 100.0
-    bonus = 0.0
-    if bm < 0.02 and de < 2.5:
-        bonus = 15.0
-    elif bm < 0.025 and de < 3.0:
-        bonus = 12.0
-    elif bm < 0.03 and de < 3.5:
-        bonus = 8.0
-    elif bm < 0.035 and de < 4.5:
-        bonus = 5.0
-    s = 35.0 + 0.45 * rel_mae + 0.35 * rel_de + bonus
-    return max(0.0, min(95.0, round(s, 1)))
+    score = 0.0
+    score += _lerp_score_desc(float(bm), good=0.0160, bad=0.0450, points=26.0)
+    score += _lerp_score_desc(float(de), good=2.25, bad=4.80, points=29.0)
+    score += _lerp_score_desc(low, good=0.0170, bad=0.0320, points=12.0)
+    score += _lerp_score_desc(delta_luma, good=0.0045, bad=0.0180, points=7.0)
+    score += _lerp_score_desc(delta_chroma, good=0.0030, bad=0.0120, points=4.0)
+    score += _lerp_score_asc(rel_mae, bad=20.0, good=58.0, points=9.0)
+    score += _lerp_score_asc(rel_de, bad=15.0, good=48.0, points=11.0)
+
+    if float(bm) <= 0.02 and float(de) <= 2.5 and (low is None or low <= 0.02):
+        score += 4.0
+    if float(bm) <= 0.018 and float(de) <= 2.35 and (low is None or low <= 0.019):
+        score += 2.0
+
+    score -= _risk_penalty(conf, safe=0.18, risky=0.32, points=7.0)
+    score -= _risk_penalty(conf_align, safe=0.10, risky=0.22, points=5.0)
+    score -= _risk_penalty(detail, safe=0.0028, risky=0.0085, points=8.0)
+    score -= _risk_penalty(gain, safe=0.030, risky=0.085, points=6.0)
+    score -= _risk_penalty(overcorr, safe=0.0012, risky=0.0060, points=7.0)
+    score -= _risk_penalty(legacy_quality, safe=7.5, risky=14.5, points=5.0)
+    return max(0.0, min(95.0, round(score, 1)))
 
 
 def _collect_best_rows(val_epochs: list[dict[str, Any]]) -> dict[str, dict[str, Any] | None]:
@@ -136,12 +182,20 @@ def _goal_status_from_best(best: dict[str, Any] | None) -> list[dict[str, Any]]:
     target_de = 2.5
     target_rel_mae = 50.0
     target_rel_de = 40.0
+    target_low = 0.02
+    target_conf = 0.22
+    target_detail = 0.0045
+    target_gain = 0.05
     goal_bars: list[dict[str, Any]] = []
 
     bm = _metric_or_none(best, "boundary_mae_16")
     bbm = _metric_or_none(best, "baseline_boundary_mae_16")
     de = _metric_or_none(best, "boundary_ciede2000_16")
     bde = _metric_or_none(best, "baseline_boundary_ciede2000_16")
+    low = _metric_or_none(best, "lowfreq_mae")
+    conf = _metric_or_none(best, "confidence_mean")
+    detail = _metric_or_none(best, "detail_abs_mean")
+    gain = _metric_or_none(best, "gain_abs_log_mean")
 
     if bm is not None:
         if bbm is not None and bbm > target_mae:
@@ -192,6 +246,46 @@ def _goal_status_from_best(best: dict[str, Any] | None) -> list[dict[str, Any]]:
                 "label": f"Гейт к 95: Rel. ΔE ≥ {target_rel_de:.0f}% (сейчас {imp:.0f}%)",
                 "distance_pct": round(100.0 * distance, 1),
                 "reached": imp >= target_rel_de,
+            }
+        )
+    if low is not None:
+        distance = _clamp01((low - target_low) / max(target_low, 1e-8))
+        goal_bars.append(
+            {
+                "id": "lowfreq",
+                "label": "Визуальный гейт: lowfreq MAE ≤ 0.02",
+                "distance_pct": round(100.0 * distance, 1),
+                "reached": low <= target_low,
+            }
+        )
+    if conf is not None:
+        distance = _clamp01((conf - target_conf) / max(target_conf, 1e-8))
+        goal_bars.append(
+            {
+                "id": "conf",
+                "label": "Риск-гейт: confidence mean ≤ 0.22",
+                "distance_pct": round(100.0 * distance, 1),
+                "reached": conf <= target_conf,
+            }
+        )
+    if detail is not None:
+        distance = _clamp01((detail - target_detail) / max(target_detail, 1e-8))
+        goal_bars.append(
+            {
+                "id": "detail",
+                "label": "Риск-гейт: detail abs mean ≤ 0.0045",
+                "distance_pct": round(100.0 * distance, 1),
+                "reached": detail <= target_detail,
+            }
+        )
+    if gain is not None:
+        distance = _clamp01((gain - target_gain) / max(target_gain, 1e-8))
+        goal_bars.append(
+            {
+                "id": "gain",
+                "label": "Риск-гейт: gain abs log mean ≤ 0.05",
+                "distance_pct": round(100.0 * distance, 1),
+                "reached": gain <= target_gain,
             }
         )
     return goal_bars
@@ -322,6 +416,10 @@ def _build_chart_payload(
             "score": score,
             "T_rel_mae": 50.0,
             "T_rel_de": 40.0,
+            "T_low": 0.02,
+            "T_conf": 0.22,
+            "T_detail": 0.0045,
+            "T_gain": 0.05,
         },
     }
 
@@ -356,7 +454,7 @@ def build_html(
     insights: list[str] = [
         "Дашборд объединяет все event-файлы из logdir; пунктирные разделители на графиках показывают границы между отдельными файлами.",
         "Train-кривые остаются кумулятивными средними на момент лога, поэтому визуально они гладче, чем пошаговые batch-loss.",
-        "Интегральная оценка 0–95 остаётся эвристикой: финальная цель дашборда — 95/95, а остальные метрики ниже трактуются как гейты и блокеры на пути к этому уровню.",
+        "Интегральная оценка 0–95 остаётся эвристикой, но теперь сильнее штрафует визуальный риск: слишком большие confidence/detail/gain поля режут score даже при хороших strip-метриках.",
     ]
     vol = report.get("val_volatility_pstdev") or {}
     if vol.get("boundary_mae_16") is not None:
@@ -378,6 +476,23 @@ def build_html(
     br = report.get("train_loss_breakdown_last_step")
     if br and br.get("components", {}).get("seam", {}).get("pct_of_weighted_sum", 0) > 80:
         insights.append("`l_seam` доминирует в weighted loss на последнем train-step. Если val-качество перестаёт расти, имеет смысл отдельно проверять баланс seam/low/chroma terms.")
+    if best_score:
+        conf = _metric_or_none(best_score, "confidence_mean")
+        detail = _metric_or_none(best_score, "detail_abs_mean")
+        gain = _metric_or_none(best_score, "gain_abs_log_mean")
+        risk_notes: list[str] = []
+        if conf is not None and conf > 0.22:
+            risk_notes.append(f"confidence={conf:.3f}")
+        if detail is not None and detail > 0.0045:
+            risk_notes.append(f"detail={detail:.4f}")
+        if gain is not None and gain > 0.05:
+            risk_notes.append(f"gain={gain:.3f}")
+        if risk_notes:
+            insights.append(
+                "На score-best эпохе остаются визуальные risk-маркеры: "
+                + ", ".join(risk_notes)
+                + ". Такие значения часто означают, что в full-frame inference шов ещё может читаться, даже если strip-метрики уже хорошие."
+            )
 
     gap_rows = ""
     if best_score:
@@ -385,6 +500,10 @@ def build_html(
         bb = _metric_or_none(best_score, "baseline_boundary_mae_16")
         de = _metric_or_none(best_score, "boundary_ciede2000_16")
         bd = _metric_or_none(best_score, "baseline_boundary_ciede2000_16")
+        low = _metric_or_none(best_score, "lowfreq_mae")
+        conf = _metric_or_none(best_score, "confidence_mean")
+        detail = _metric_or_none(best_score, "detail_abs_mean")
+        gain = _metric_or_none(best_score, "gain_abs_log_mean")
         im_m = (1.0 - bm / bb) * 100.0 if bm is not None and bb and bb > 0 else None
         im_d = (1.0 - de / bd) * 100.0 if de is not None and bd and bd > 0 else None
         gap_rows = f"""
@@ -403,6 +522,18 @@ def build_html(
         <tr><td>Гейт к 95: Rel. ΔE</td><td>{_html_escape(f"{im_d:.1f}%" if im_d is not None else "—")}</td>
             <td class="ok">≥ {target_rel_de}%</td>
             <td>{"пропускает к 95" if im_d is not None and im_d >= target_rel_de else "блокирует 95"}</td></tr>
+        <tr><td>Визуальный гейт: lowfreq MAE</td><td>{_html_escape(f"{low:.5f}" if low is not None else "—")}</td>
+            <td class="ok">≤ 0.02</td>
+            <td>{"поддерживает 95" if low is not None and low <= 0.02 else "ещё даёт видимый риск"}</td></tr>
+        <tr><td>Риск-гейт: confidence mean</td><td>{_html_escape(f"{conf:.3f}" if conf is not None else "—")}</td>
+            <td class="ok">≤ 0.22</td>
+            <td>{"безопасно" if conf is not None and conf <= 0.22 else "слишком агрессивная коррекция"}</td></tr>
+        <tr><td>Риск-гейт: detail abs mean</td><td>{_html_escape(f"{detail:.4f}" if detail is not None else "—")}</td>
+            <td class="ok">≤ 0.0045</td>
+            <td>{"безопасно" if detail is not None and detail <= 0.0045 else "может усиливать локальные швы"}</td></tr>
+        <tr><td>Риск-гейт: gain abs log mean</td><td>{_html_escape(f"{gain:.3f}" if gain is not None else "—")}</td>
+            <td class="ok">≤ 0.05</td>
+            <td>{"безопасно" if gain is not None and gain <= 0.05 else "низкочастотная полоса всё ещё вероятна"}</td></tr>
         """
 
     val_table = ""
@@ -459,10 +590,18 @@ def build_html(
         de = _metric_or_none(best_score, "boundary_ciede2000_16")
         bd = _metric_or_none(best_score, "baseline_boundary_ciede2000_16")
         rel_d = (1.0 - de / bd) * 100.0 if de is not None and bd and bd > 0 else 0.0
+        low = _metric_or_none(best_score, "lowfreq_mae")
+        conf = _metric_or_none(best_score, "confidence_mean")
+        detail = _metric_or_none(best_score, "detail_abs_mean")
+        gain = _metric_or_none(best_score, "gain_abs_log_mean")
         progress_html = (
             "<h2 class='sec-h'>Подметрики на пути к 95</h2><div class=\"card bars-card\">"
             + _bar_pct("Готовность по Rel. MAE", rel_m, target_rel_mae)
             + _bar_pct("Готовность по Rel. ΔE", rel_d, target_rel_de)
+            + _bar_pct("Стабильность lowfreq", 100.0 * _clamp01((0.03 - (low or 0.03)) / 0.01), 100.0)
+            + _bar_pct("Безопасность confidence", 100.0 * _clamp01((0.32 - (conf or 0.32)) / 0.14), 100.0)
+            + _bar_pct("Безопасность detail", 100.0 * _clamp01((0.0085 - (detail or 0.0085)) / 0.0057), 100.0)
+            + _bar_pct("Безопасность gain", 100.0 * _clamp01((0.085 - (gain or 0.085)) / 0.055), 100.0)
             + "</div>"
         )
 
@@ -583,11 +722,11 @@ def build_html(
       {f" · ≈{bpe} батчей/эп." if bpe else ""}</p>
     </div>
     <div class="card scorebox" style="margin:0;">
-      <div style="font-size:0.8rem;color:var(--muted);">Интегральная оценка</div>
+      <div style="font-size:0.8rem;color:var(--muted);">Интегральная оценка (production proxy)</div>
       <div class="scorenum">{_html_escape(score) if score is not None else "—"}<span style="font-size:1.2rem;opacity:0.6">/95</span></div>
       <p style="margin:0.4rem 0 0;font-size:0.78rem;color:var(--muted);">≈{gap_to_95:.0f} пункта до целевого качества «95» на шкале</p>
       <div class="track"><div class="fill"></div><div class="mark95"></div></div>
-      <p style="font-size:0.72rem;margin:0;color:var(--muted);">Зелёная отметка показывает финальную цель шкалы: 95/95 соответствует целевому качеству для этого dashboard.</p>
+      <p style="font-size:0.72rem;margin:0;color:var(--muted);">Шкала учитывает не только strip-ошибку, но и визуальные risk-маркеры: слишком большие confidence/detail/gain поля режут score.</p>
     </div>
   </div>
 
@@ -658,7 +797,7 @@ def build_html(
       <thead>
         <tr>
           <th>Эп.</th><th>Step</th><th>MAE@16</th><th>Baseline</th>
-          <th>ΔE@16</th><th>quality</th><th>val loss</th><th>Метки</th>
+          <th>ΔE@16</th><th>quality(old)</th><th>val loss</th><th>Метки</th>
         </tr>
       </thead>
       <tbody>{val_table or "<tr><td colspan=8>—</td></tr>"}</tbody>
@@ -689,7 +828,7 @@ def build_html(
   <div class="card"><pre style="white-space:pre-wrap;font-size:0.78rem;">{_html_escape(str(report.get("best_epochs")))}</pre></div>
 
   <p class="note">
-    Дашборд интерпретирует 95/95 как финальную цель. Оценка строится как: 35 + 0.45×(rel MAE%) + 0.35×(rel ΔE%) + бонус, cap 0..95.
+    Дашборд интерпретирует 95/95 как финальную цель. Оценка теперь собирается из absolute MAE/ΔE/lowfreq, relative improvement и штрафов за confidence/detail/gain, чтобы быть ближе к реальному визуальному результату в full-frame inference.
     <br />Запуск: <code>python scripts/harmonizer_metrics_dashboard.py</code>
   </p>
 </div>
