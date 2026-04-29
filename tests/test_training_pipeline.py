@@ -141,11 +141,13 @@ class TestLossAndMetrics:
             "l_lab",
             "l_profile",
             "l_conf_align",
+            "l_conf_metric",
             "l_overcorr",
             "l_gate",
             "l_field",
             "l_detail",
             "l_matrix",
+            "l_gain_reg",
         }
         assert expected.issubset(losses.keys())
 

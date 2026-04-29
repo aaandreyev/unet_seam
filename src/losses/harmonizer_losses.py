@@ -149,7 +149,9 @@ class HarmonizerLossComputer:
             "lab": 0.80,
             "profile": 0.55,
             "conf_align": 0.18,
+            "conf_metric": 0.10,
             "overcorr": 0.22,
+            "gain_reg": 0.08,
         }
         self.weights = default_weights | (weights or {})
 
@@ -210,6 +212,9 @@ class HarmonizerLossComputer:
         target_conf = _confidence_target_map(input_inner, target, seam_weight, sigma=max(self.low_sigma, 5.0))
         conf_err = charbonnier(outputs["confidence"] - target_conf)
         l_conf_align = 0.8 * _masked_mean(conf_err, seam_weight) + 0.2 * _masked_mean(conf_err, inner_weight)
+        metric_target_conf = ((target - input_inner).abs().mean(dim=1, keepdim=True) / 0.08).clamp(0.0, 1.0)
+        conf_metric_err = charbonnier(outputs["confidence"] - metric_target_conf)
+        l_conf_metric = 0.35 * _masked_mean(conf_metric_err, seam_weight) + 0.65 * _masked_mean(conf_metric_err, full_mask)
         delta_pred_mag = gaussian_blur_tensor((pred - input_inner).abs(), self.low_sigma).mean(dim=1, keepdim=True)
         delta_target_mag = gaussian_blur_tensor((target - input_inner).abs(), self.low_sigma).mean(dim=1, keepdim=True)
         overcorr_map = (delta_pred_mag - delta_target_mag).clamp_min(0.0)
@@ -232,6 +237,8 @@ class HarmonizerLossComputer:
         l_matrix = (outputs["color_matrix"] - identity).abs().mean() + outputs["bias"].abs().mean()
         detail_abs = outputs["detail"].abs().mean(dim=1, keepdim=True)
         l_detail = 0.5 * _masked_mean(detail_abs, boundary) + 1.25 * _masked_mean_or_zero(detail_abs, outside_boundary)
+        gain_log_abs = outputs["gain"].clamp_min(1e-6).log().abs().mean(dim=1, keepdim=True)
+        l_gain_reg = 0.2 * _masked_mean(gain_log_abs, seam_weight) + 0.35 * _masked_mean(gain_log_abs, inner_weight) + 1.0 * _masked_mean_or_zero(gain_log_abs, outside_boundary)
         w = self.weights
         total = (
             w["rec"] * l_rec
@@ -243,11 +250,13 @@ class HarmonizerLossComputer:
             + w["lab"] * l_lab
             + w["profile"] * l_profile
             + w["conf_align"] * l_conf_align
+            + w["conf_metric"] * l_conf_metric
             + w["overcorr"] * l_overcorr
             + w["gate"] * l_gate
             + w["field"] * l_field
             + w["detail"] * l_detail
             + w["matrix"] * l_matrix
+            + w["gain_reg"] * l_gain_reg
         )
         return {
             "total": total,
@@ -260,9 +269,11 @@ class HarmonizerLossComputer:
             "l_lab": l_lab,
             "l_profile": l_profile,
             "l_conf_align": l_conf_align,
+            "l_conf_metric": l_conf_metric,
             "l_overcorr": l_overcorr,
             "l_gate": l_gate,
             "l_field": l_field,
             "l_detail": l_detail,
             "l_matrix": l_matrix,
+            "l_gain_reg": l_gain_reg,
         }

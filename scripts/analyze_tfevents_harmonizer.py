@@ -30,11 +30,13 @@ _DEFAULT_LOSS_WEIGHTS: dict[str, float] = {
     "lab": 0.8,
     "profile": 0.55,
     "conf_align": 0.18,
+    "conf_metric": 0.14,
     "overcorr": 0.22,
     "gate": 0.03,
     "field": 0.10,
     "detail": 0.08,
     "matrix": 0.10,
+    "gain_reg": 0.12,
 }
 
 
@@ -126,11 +128,13 @@ def _table_val_epochs(
             "l_lab",
             "l_profile",
             "l_conf_align",
+            "l_conf_metric",
             "l_overcorr",
             "l_gate",
             "l_field",
             "l_detail",
             "l_matrix",
+            "l_gain_reg",
         ):
             v = pick(f"{loss_p}{key}")
             if v is not None:
@@ -204,11 +208,13 @@ def _weighted_loss_breakdown_at_step(
         "l_lab": "lab",
         "l_profile": "profile",
         "l_conf_align": "conf_align",
+        "l_conf_metric": "conf_metric",
         "l_overcorr": "overcorr",
         "l_gate": "gate",
         "l_field": "field",
         "l_detail": "detail",
         "l_matrix": "matrix",
+        "l_gain_reg": "gain_reg",
     }
     raw: dict[str, float] = {}
     for lk, wk in mapping.items():
