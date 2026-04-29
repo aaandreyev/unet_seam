@@ -23,6 +23,34 @@ def _copy_one(args: tuple[Path, Path]) -> int:
     return src.stat().st_size
 
 
+def _should_use_tqdm() -> bool:
+    return sys.stdout.isatty() and os.environ.get("UNET_SEAM_PLAIN_PROGRESS") != "1"
+
+
+def _maybe_log_plain_progress(
+    *,
+    label: str,
+    done: int,
+    total: int,
+    started: float,
+    last_log_at: float,
+    force: bool = False,
+    **metrics: object,
+) -> float:
+    now = time.perf_counter()
+    if not force and done < total and now - last_log_at < 2.0:
+        return last_log_at
+    elapsed = max(now - started, 1e-6)
+    pct = (100.0 * done / total) if total else 100.0
+    eta = ((total - done) * (elapsed / max(done, 1))) if total else 0.0
+    extras = " ".join(f"{key}={value}" for key, value in metrics.items())
+    line = f"{label}: {done}/{total} ({pct:.1f}%) elapsed={elapsed:.1f}s eta={eta:.0f}s"
+    if extras:
+        line = f"{line} {extras}"
+    print(line, flush=True)
+    return now
+
+
 def _copy_tree(src_root: Path, dst_root: Path, workers: int) -> dict[str, int]:
     files = [p for p in src_root.rglob("*") if p.is_file() and p.suffix.lower() in RAW_EXTS]
     if not files:
@@ -32,16 +60,46 @@ def _copy_tree(src_root: Path, dst_root: Path, workers: int) -> dict[str, int]:
     workers = max(1, min(workers, len(files)))
     total_bytes = 0
     started = time.perf_counter()
+    use_tqdm = _should_use_tqdm()
+    last_log_at = started
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        progress = tqdm(
-            executor.map(_copy_one, ((p, dst_root / p.relative_to(src_root)) for p in files), chunksize=8),
-            total=len(files),
-            desc="copy_raw_sources",
-            dynamic_ncols=True,
-        )
-        for copied in progress:
+        iterator = executor.map(_copy_one, ((p, dst_root / p.relative_to(src_root)) for p in files), chunksize=8)
+        if use_tqdm:
+            iterator = tqdm(
+                iterator,
+                total=len(files),
+                desc="copy_raw_sources",
+                dynamic_ncols=True,
+                mininterval=0.5,
+            )
+        copied_files = 0
+        for copied in iterator:
             total_bytes += copied
-            progress.set_postfix(gb=round(total_bytes / (1024**3), 2))
+            copied_files += 1
+            gb = round(total_bytes / (1024**3), 2)
+            if use_tqdm:
+                iterator.set_postfix(gb=gb)
+            else:
+                last_log_at = _maybe_log_plain_progress(
+                    label="copy_raw_sources",
+                    done=copied_files,
+                    total=len(files),
+                    started=started,
+                    last_log_at=last_log_at,
+                    gb=gb,
+                    workers=workers,
+                )
+        if not use_tqdm:
+            _maybe_log_plain_progress(
+                label="copy_raw_sources",
+                done=len(files),
+                total=len(files),
+                started=started,
+                last_log_at=last_log_at,
+                force=True,
+                gb=round(total_bytes / (1024**3), 2),
+                workers=workers,
+            )
     elapsed = max(time.perf_counter() - started, 1e-6)
     return {
         "files": len(files),

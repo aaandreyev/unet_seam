@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import shutil
+import sys
 import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
@@ -32,7 +33,35 @@ def _save_rgb(path: Path, tensor: torch.Tensor) -> None:
 
 def _save_mask(path: Path, tensor: torch.Tensor) -> None:
     arr = (tensor.numpy().clip(0.0, 1.0) * 255.0).astype("uint8")
-    Image.fromarray(arr, mode="L").save(path)
+    Image.fromarray(arr).save(path)
+
+
+def _should_use_tqdm() -> bool:
+    return sys.stdout.isatty() and os.environ.get("UNET_SEAM_PLAIN_PROGRESS") != "1"
+
+
+def _maybe_log_plain_progress(
+    *,
+    label: str,
+    done: int,
+    total: int,
+    started: float,
+    last_log_at: float,
+    force: bool = False,
+    **metrics: Any,
+) -> float:
+    now = time.perf_counter()
+    if not force and done < total and now - last_log_at < 2.0:
+        return last_log_at
+    elapsed = max(now - started, 1e-6)
+    pct = (100.0 * done / total) if total else 100.0
+    eta = ((total - done) * (elapsed / max(done, 1))) if total else 0.0
+    extras = " ".join(f"{key}={value}" for key, value in metrics.items())
+    line = f"{label}: {done}/{total} ({pct:.1f}%) elapsed={elapsed:.1f}s eta={eta:.0f}s"
+    if extras:
+        line = f"{line} {extras}"
+    print(line, flush=True)
+    return now
 
 
 def _build_dataset(cfg: dict[str, Any], manifest_path: Path) -> SyntheticStripDataset:
@@ -121,29 +150,59 @@ def main() -> None:
     _EXPORT_ROOT = str(out_dir)
     all_rows: list[dict] = []
     started = time.perf_counter()
+    use_tqdm = _should_use_tqdm()
+    last_log_at = started
     with ProcessPoolExecutor(
         max_workers=worker_count,
         initializer=_worker_init,
         initargs=(str(config_path), str(manifest_path), str(out_dir)),
     ) as executor:
-        progress = tqdm(
-            executor.map(_export_row, range(len(rows)), chunksize=1),
-            total=len(rows),
-            desc="materialize_dataset",
-            dynamic_ncols=True,
-        )
-        for chunk in progress:
+        iterator = executor.map(_export_row, range(len(rows)), chunksize=1)
+        if use_tqdm:
+            iterator = tqdm(
+                iterator,
+                total=len(rows),
+                desc="materialize_dataset",
+                dynamic_ncols=True,
+                mininterval=0.5,
+            )
+        rows_done = 0
+        for chunk in iterator:
             all_rows.extend(chunk)
+            rows_done += 1
             elapsed = max(time.perf_counter() - started, 1e-6)
             samples_per_sec = len(all_rows) / elapsed
-            rows_done = progress.n
             rows_left = max(len(rows) - rows_done, 0)
             eta_sec = rows_left * (elapsed / max(rows_done, 1))
-            progress.set_postfix(
+            if use_tqdm:
+                iterator.set_postfix(
+                    samples=len(all_rows),
+                    workers=worker_count,
+                    sps=round(samples_per_sec, 1),
+                    eta_s=int(eta_sec),
+                )
+            else:
+                last_log_at = _maybe_log_plain_progress(
+                    label="materialize_dataset",
+                    done=rows_done,
+                    total=len(rows),
+                    started=started,
+                    last_log_at=last_log_at,
+                    samples=len(all_rows),
+                    workers=worker_count,
+                    sps=round(samples_per_sec, 1),
+                )
+        if not use_tqdm:
+            _maybe_log_plain_progress(
+                label="materialize_dataset",
+                done=len(rows),
+                total=len(rows),
+                started=started,
+                last_log_at=last_log_at,
+                force=True,
                 samples=len(all_rows),
                 workers=worker_count,
-                sps=round(samples_per_sec, 1),
-                eta_s=int(eta_sec),
+                sps=round(len(all_rows) / max(time.perf_counter() - started, 1e-6), 1),
             )
 
     write_jsonl(out_dir / "manifest.jsonl", all_rows)
