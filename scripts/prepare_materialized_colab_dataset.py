@@ -34,7 +34,7 @@ def _copy_tree(src_root: Path, dst_root: Path, workers: int) -> dict[str, int]:
         )
         for copied in progress:
             total_bytes += copied
-            progress.set_postfix_gb(round(total_bytes / (1024**3), 2))
+            progress.set_postfix(gb=round(total_bytes / (1024**3), 2))
     return {"files": len(files), "bytes": total_bytes}
 
 
