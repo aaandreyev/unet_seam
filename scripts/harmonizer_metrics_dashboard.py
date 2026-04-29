@@ -30,6 +30,7 @@ analyze = _mod.analyze
 _merge_runs = _mod._merge_runs
 _find_event_files = _mod._find_event_files
 _load_scalars = _mod._load_scalars
+_load_loss_weights = _mod._load_loss_weights
 
 # Chart.js (CDN) — при блокировке file:// откройте через: python -m http.server
 CHART_CDN = "https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
@@ -452,7 +453,7 @@ def build_html(
     ch_json = _json_for_script(ch)
 
     insights: list[str] = [
-        "Дашборд объединяет все event-файлы из logdir; пунктирные разделители на графиках показывают границы между отдельными файлами.",
+        "Дашборд объединяет все event-файлы из logdir; при одинаковых global step приоритет отдаётся более новому event-файлу, чтобы resume не подмешивал старую val-метрику.",
         "Train-кривые остаются кумулятивными средними на момент лога, поэтому визуально они гладче, чем пошаговые batch-loss.",
         "Интегральная оценка 0–95 остаётся эвристикой, но теперь сильнее штрафует визуальный риск: слишком большие confidence/detail/gain поля режут score даже при хороших strip-метриках.",
     ]
@@ -720,6 +721,7 @@ def build_html(
       <p class="meta"><span class="badge">TB</span><code>{_html_escape(latest.name if latest else "—")}</code>
       <br />event-файлов: {len(source_files)} · шаги: {_html_escape(tmax)} · val точек: {n_val} · train лог-точек: {n_train_pts}
       {f" · ≈{bpe} батчей/эп." if bpe else ""}</p>
+      <p class="meta">Loss weights source: <code>{_html_escape(report.get("loss_weight_source", "—"))}</code></p>
     </div>
     <div class="card scorebox" style="margin:0;">
       <div style="font-size:0.8rem;color:var(--muted);">Интегральная оценка (production proxy)</div>
@@ -1001,6 +1003,7 @@ def build_html(
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--logdir", type=Path, default=_ROOT / "outputs" / "logs" / "tensorboard_harmonizer")
+    ap.add_argument("--train-config", type=Path, default=_ROOT / "runtime_configs" / "train.yaml")
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("-o", "--output", type=Path, default=None)
     args = ap.parse_args()
@@ -1019,7 +1022,12 @@ def main() -> None:
 
     files = sorted(files, key=lambda p: p.stat().st_mtime)
     data = _merge_runs(files)
-    report = analyze(data)
+    train_config = args.train_config if args.train_config.exists() else None
+    report = analyze(
+        data,
+        loss_weights=_load_loss_weights(train_config),
+        loss_weight_source=str(train_config) if train_config is not None else "built-in defaults",
+    )
     best_rows = _collect_best_rows(report.get("val_epochs") or [])
     score = _integrated_score_0_95(best_rows.get("score")) if best_rows.get("score") else None
     segments = _build_run_segments(files)

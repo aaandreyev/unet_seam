@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 
@@ -141,3 +142,61 @@ def test_build_run_segments_tracks_multiple_event_files(monkeypatch, tmp_path: P
     assert segments[1]["train_boundary"] == 30
     assert segments[1]["val_boundary_epoch"] == 2
     assert segments[1]["markers"]["train/loss/total"] == {"x": 40.0, "y": 0.6}
+
+
+def test_merge_runs_prefers_latest_file_for_duplicate_steps(monkeypatch, tmp_path: Path):
+    path = Path("scripts/analyze_tfevents_harmonizer.py")
+    spec = importlib.util.spec_from_file_location("analyze_tfevents_harmonizer", path)
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    f1 = tmp_path / "events.out.tfevents.1"
+    f2 = tmp_path / "events.out.tfevents.2"
+    f1.write_text("")
+    f2.write_text("")
+
+    scalars = {
+        f1: {
+            "val/metric/boundary_mae_16": [(100, 0.05)],
+            "val/metric/baseline_boundary_mae_16": [(100, 0.10)],
+        },
+        f2: {
+            "val/metric/boundary_mae_16": [(100, 0.02)],
+            "val/metric/baseline_boundary_mae_16": [(100, 0.10)],
+        },
+    }
+
+    monkeypatch.setattr(mod, "_load_scalars", lambda path: scalars[path])
+    merged = mod._merge_runs([f1, f2])
+    report = mod.analyze(merged)
+
+    assert report["val_epochs"][0]["boundary_mae_16"] == 0.02
+
+
+def test_analyze_uses_configured_loss_weights(tmp_path: Path):
+    path = Path("scripts/analyze_tfevents_harmonizer.py")
+    spec = importlib.util.spec_from_file_location("analyze_tfevents_harmonizer", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+
+    cfg = tmp_path / "train.yaml"
+    cfg.write_text(
+        "loss:\n  weights:\n    rec: 2.0\n    seam: 0.5\n",
+        encoding="utf-8",
+    )
+    data = {
+        "train/loss/total": [(10, 3.0)],
+        "train/loss/l_rec": [(10, 1.0)],
+        "train/loss/l_seam": [(10, 2.0)],
+        "val/metric/boundary_mae_16": [(10, 0.02)],
+        "val/metric/baseline_boundary_mae_16": [(10, 0.04)],
+        "val/metric/boundary_ciede2000_16": [(10, 2.5)],
+        "val/metric/baseline_boundary_ciede2000_16": [(10, 5.0)],
+    }
+
+    report = module.analyze(data, loss_weights=module._load_loss_weights(cfg))
+    parts = report["train_loss_breakdown_last_step"]["components"]
+
+    assert parts["rec"]["weighted"] == 2.0
+    assert parts["seam"]["weighted"] == 1.0

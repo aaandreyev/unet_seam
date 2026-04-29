@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 # Default loss weights (HarmonizerLossComputer) for contribution estimates
 _DEFAULT_LOSS_WEIGHTS: dict[str, float] = {
     "rec": 0.8,
@@ -59,14 +61,25 @@ def _load_scalars(path: Path) -> dict[str, list[tuple[int, float]]]:
 
 
 def _merge_runs(files: list[Path]) -> dict[str, list[tuple[int, float]]]:
-    merged: dict[str, list[tuple[int, float]]] = {}
+    merged: dict[str, dict[int, float]] = {}
     for f in files:
         part = _load_scalars(f)
-        for k, v in part.items():
-            merged.setdefault(k, []).extend(v)
-    for k in merged:
-        merged[k].sort(key=lambda t: (t[0], t[1]))
-    return merged
+        for tag, points in part.items():
+            by_step = merged.setdefault(tag, {})
+            for step, value in points:
+                by_step[int(step)] = float(value)
+    return {tag: sorted(points.items()) for tag, points in merged.items()}
+
+
+def _load_loss_weights(path: Path | None) -> dict[str, float]:
+    weights = dict(_DEFAULT_LOSS_WEIGHTS)
+    if path is None:
+        return weights
+    cfg = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    loaded = ((cfg.get("loss") or {}).get("weights") or {})
+    for key, value in loaded.items():
+        weights[str(key)] = float(value)
+    return weights
 
 
 def _infer_val_steps(data: dict[str, list[tuple[int, float]]]) -> list[int]:
@@ -178,7 +191,7 @@ def _train_summary(data: dict[str, list[tuple[int, float]]], tag: str) -> dict[s
 
 
 def _weighted_loss_breakdown_at_step(
-    data: dict[str, list[tuple[int, float]]], step: int
+    data: dict[str, list[tuple[int, float]]], step: int, loss_weights: dict[str, float]
 ) -> dict[str, Any] | None:
     """Estimate contribution of each term to total at a given global step (train)."""
     mapping = {
@@ -209,14 +222,14 @@ def _weighted_loss_breakdown_at_step(
     total_w = 0.0
     parts: dict[str, float] = {}
     for wk, v in raw.items():
-        w = _DEFAULT_LOSS_WEIGHTS.get(wk, 0.0)
+        w = loss_weights.get(wk, 0.0)
         parts[wk] = w * v
         total_w += parts[wk]
     out: dict[str, Any] = {"step": step, "weighted_sum": total_w, "components": {}}
     for wk, contrib in parts.items():
         out["components"][wk] = {
             "raw": raw[wk],
-            "weight": _DEFAULT_LOSS_WEIGHTS.get(wk, 0.0),
+            "weight": loss_weights.get(wk, 0.0),
             "weighted": contrib,
             "pct_of_weighted_sum": (100.0 * contrib / total_w) if total_w > 1e-12 else 0.0,
         }
@@ -243,7 +256,13 @@ def _volatility(rows: list[dict[str, Any]], key: str) -> float | None:
 
 def analyze(
     data: dict[str, list[tuple[int, float]]],
+    *,
+    loss_weights: dict[str, float] | None = None,
+    loss_weight_source: str | None = None,
 ) -> dict[str, Any]:
+    resolved_loss_weights = dict(_DEFAULT_LOSS_WEIGHTS)
+    if loss_weights is not None:
+        resolved_loss_weights.update({str(k): float(v) for k, v in loss_weights.items()})
     val_steps = _infer_val_steps(data)
     train_steps = [s for s, _ in data.get("train/loss/total", [])]
     train_max = max(train_steps) if train_steps else 0
@@ -258,6 +277,8 @@ def analyze(
         "train_global_step_max": train_max,
         "val_epochs": val_rows,
         "train_summaries": {},
+        "loss_weights": resolved_loss_weights,
+        "loss_weight_source": loss_weight_source or "built-in defaults",
     }
     for t in (
         "train/loss/total",
@@ -288,7 +309,7 @@ def analyze(
     tt = data.get("train/loss/total", [])
     if tt:
         last_step = tt[-1][0]
-        br = _weighted_loss_breakdown_at_step(data, last_step)
+        br = _weighted_loss_breakdown_at_step(data, last_step, resolved_loss_weights)
         if br:
             report["train_loss_breakdown_last_step"] = br
 
@@ -397,6 +418,7 @@ def _print_human(r: dict[str, Any]) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Analyze harmonizer TensorBoard event file(s)")
     ap.add_argument("path", type=Path, help="Event file or directory with events.out.tfevents.*")
+    ap.add_argument("--train-config", type=Path, default=None, help="Optional train config YAML for current loss weights")
     ap.add_argument("--json", type=Path, default=None, help="Write full report JSON here")
     args = ap.parse_args()
     files = _find_event_files(args.path)
@@ -404,7 +426,11 @@ def main() -> None:
     if not data:
         print("No scalar data found.", file=sys.stderr)
         sys.exit(1)
-    report = analyze(data)
+    report = analyze(
+        data,
+        loss_weights=_load_loss_weights(args.train_config),
+        loss_weight_source=str(args.train_config) if args.train_config is not None else "built-in defaults",
+    )
     report["source_files"] = [str(f) for f in files]
     _print_human(report)
     if args.json:
