@@ -35,12 +35,12 @@ loss:
     matrix: 0.06
     profile: 0.55
     conf_align: 0.18
-    conf_metric: 0.14
+    conf_metric: 0.06
     overcorr: 0.12
-    gain_reg: 0.12
+    gain_reg: 0.04
 train:
   seed: 43
-  lr: 2.0e-5
+  lr: 2.5e-5
   weight_decay: 1.0e-4
   betas: [0.9, 0.99]
   precision: bf16
@@ -50,12 +50,12 @@ train:
   num_workers: 4
   compile: false
 scheduler:
-  warmup_steps: 60
+  warmup_steps: 80
   min_lr_scale: 0.2
 ema:
   decay: 0.999
 logging:
   tensorboard: true
-  log_dir: outputs/logs/tensorboard_harmonizer_stage6
+  log_dir: outputs/logs/tensorboard_harmonizer_stage6b
   log_interval: 20
   console_log_interval: 25

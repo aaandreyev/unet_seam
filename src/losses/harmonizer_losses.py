@@ -149,9 +149,9 @@ class HarmonizerLossComputer:
             "lab": 0.80,
             "profile": 0.55,
             "conf_align": 0.18,
-            "conf_metric": 0.10,
+            "conf_metric": 1.0e-8,
             "overcorr": 0.22,
-            "gain_reg": 0.08,
+            "gain_reg": 1.0e-8,
         }
         self.weights = default_weights | (weights or {})
 

@@ -30,13 +30,13 @@ _DEFAULT_LOSS_WEIGHTS: dict[str, float] = {
     "lab": 0.8,
     "profile": 0.55,
     "conf_align": 0.18,
-    "conf_metric": 0.14,
+    "conf_metric": 1.0e-8,
     "overcorr": 0.22,
     "gate": 0.03,
     "field": 0.10,
     "detail": 0.08,
     "matrix": 0.10,
-    "gain_reg": 0.12,
+    "gain_reg": 1.0e-8,
 }
 
 
