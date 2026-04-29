@@ -90,36 +90,36 @@ def _worker_init(config_path: str, manifest_path: str, export_root: str) -> None
     _EXPORT_ROOT = export_root
 
 
-def _export_row(row_idx: int) -> list[dict]:
+def _export_sample(sample_idx: int) -> dict:
     global _DATASET
     dataset: SyntheticStripDataset = _DATASET
-    strips_per_image = dataset.strips_per_image
     base_out = Path(_EXPORT_ROOT)
-    rows: list[dict] = []
-    for local_idx in range(strips_per_image):
-        idx = row_idx * strips_per_image + local_idx
-        sample = dataset[idx]
-        stem = f"{idx:08d}"
-        input_rel = Path("inputs") / f"{stem}.png"
-        target_rel = Path("targets") / f"{stem}.png"
-        mask_rel = Path("masks") / f"{stem}.png"
-        meta_rel = Path("meta") / f"{stem}.json"
-        _save_rgb(base_out / input_rel, sample["input_rgb"])
-        _save_rgb(base_out / target_rel, sample["target"])
-        _save_mask(base_out / mask_rel, sample["mask"][0])
-        row = {
-            **sample["meta"],
-            "sample_index": idx,
-            "input_path": str(input_rel),
-            "target_path": str(target_rel),
-            "mask_path": str(mask_rel),
-            "outer_width": int(dataset.spec.outer_width),
-            "strip_height": int(dataset.spec.strip_height),
-            "boundary_band_px": int(dataset.boundary_band_px),
-        }
-        (base_out / meta_rel).write_text(json.dumps(row, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        rows.append(row)
-    return rows
+    sample = dataset[sample_idx]
+    stem = f"{sample_idx:08d}"
+    input_rel = Path("inputs") / f"{stem}.png"
+    target_rel = Path("targets") / f"{stem}.png"
+    mask_rel = Path("masks") / f"{stem}.png"
+    meta_rel = Path("meta") / f"{stem}.json"
+    _save_rgb(base_out / input_rel, sample["input_rgb"])
+    _save_rgb(base_out / target_rel, sample["target"])
+    _save_mask(base_out / mask_rel, sample["mask"][0])
+    row = {
+        **sample["meta"],
+        "sample_index": sample_idx,
+        "input_path": str(input_rel),
+        "target_path": str(target_rel),
+        "mask_path": str(mask_rel),
+        "outer_width": int(dataset.spec.outer_width),
+        "strip_height": int(dataset.spec.strip_height),
+        "boundary_band_px": int(dataset.boundary_band_px),
+    }
+    (base_out / meta_rel).write_text(json.dumps(row, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return row
+
+
+def _export_chunk(chunk: tuple[int, int]) -> list[dict]:
+    start_idx, end_idx = chunk
+    return [_export_sample(sample_idx) for sample_idx in range(start_idx, end_idx)]
 
 
 def main() -> None:
@@ -128,6 +128,7 @@ def main() -> None:
     parser.add_argument("--manifest", default="manifests/input_raw_manifest.jsonl")
     parser.add_argument("--out", required=True)
     parser.add_argument("--workers", type=int, default=max(1, os.cpu_count() or 4))
+    parser.add_argument("--samples-per-task", type=int, default=4)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -144,7 +145,13 @@ def main() -> None:
     rows = read_jsonl(manifest_path)
     if not rows:
         raise ValueError(f"empty manifest: {manifest_path}")
-    worker_count = max(1, min(args.workers, len(rows)))
+    strips_per_image = int(yaml.safe_load(config_path.read_text(encoding="utf-8"))["dataset"].get("strips_per_image", 25))
+    total_samples = len(rows) * strips_per_image
+    if total_samples <= 0:
+        raise ValueError("materialization requires at least one sample")
+    worker_count = max(1, min(args.workers, total_samples))
+    samples_per_task = max(1, args.samples_per_task)
+    tasks = [(start_idx, min(start_idx + samples_per_task, total_samples)) for start_idx in range(0, total_samples, samples_per_task)]
 
     global _EXPORT_ROOT
     _EXPORT_ROOT = str(out_dir)
@@ -157,26 +164,26 @@ def main() -> None:
         initializer=_worker_init,
         initargs=(str(config_path), str(manifest_path), str(out_dir)),
     ) as executor:
-        futures = [executor.submit(_export_row, row_idx) for row_idx in range(len(rows))]
+        futures = [executor.submit(_export_chunk, task) for task in tasks]
         progress = None
         if use_tqdm:
             progress = tqdm(
-                total=len(rows),
+                total=total_samples,
                 desc="materialize_dataset",
                 dynamic_ncols=True,
                 mininterval=0.5,
             )
-        rows_done = 0
+        samples_done = 0
         for future in as_completed(futures):
             chunk = future.result()
             all_rows.extend(chunk)
-            rows_done += 1
+            samples_done += len(chunk)
             elapsed = max(time.perf_counter() - started, 1e-6)
             samples_per_sec = len(all_rows) / elapsed
-            rows_left = max(len(rows) - rows_done, 0)
-            eta_sec = rows_left * (elapsed / max(rows_done, 1))
+            samples_left = max(total_samples - samples_done, 0)
+            eta_sec = samples_left * (elapsed / max(samples_done, 1))
             if use_tqdm and progress is not None:
-                progress.update(1)
+                progress.update(len(chunk))
                 progress.set_postfix(
                     samples=len(all_rows),
                     workers=worker_count,
@@ -186,25 +193,23 @@ def main() -> None:
             else:
                 last_log_at = _maybe_log_plain_progress(
                     label="materialize_dataset",
-                    done=rows_done,
-                    total=len(rows),
+                    done=samples_done,
+                    total=total_samples,
                     started=started,
                     last_log_at=last_log_at,
-                    samples=len(all_rows),
                     workers=worker_count,
                     sps=round(samples_per_sec, 1),
                 )
         if progress is not None:
             progress.close()
-        elif rows_done != len(rows):
+        elif samples_done != total_samples:
             _maybe_log_plain_progress(
                 label="materialize_dataset",
-                done=len(rows),
-                total=len(rows),
+                done=total_samples,
+                total=total_samples,
                 started=started,
                 last_log_at=last_log_at,
                 force=True,
-                samples=len(all_rows),
                 workers=worker_count,
                 sps=round(len(all_rows) / max(time.perf_counter() - started, 1e-6), 1),
             )
