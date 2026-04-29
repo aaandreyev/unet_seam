@@ -160,6 +160,9 @@ def main() -> None:
     py = sys.executable
     env = os.environ.copy()
     env["PYTHONPATH"] = str(pr) if not env.get("PYTHONPATH") else f"{str(pr)}{os.pathsep}{env['PYTHONPATH']}"
+    env.setdefault("OMP_NUM_THREADS", "1")
+    env.setdefault("MKL_NUM_THREADS", "1")
+    env.setdefault("OPENBLAS_NUM_THREADS", "1")
     stage_timings = {}
     stage_timings["prepare_source_sec"] = round(
         _run_stage(

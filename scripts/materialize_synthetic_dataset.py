@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
 import os
 import shutil
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,14 @@ def _build_dataset(cfg: dict[str, Any], manifest_path: Path) -> SyntheticStripDa
 
 def _worker_init(config_path: str, manifest_path: str, export_root: str) -> None:
     global _DATASET, _EXPORT_ROOT
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    try:
+        torch.set_num_threads(1)
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
     cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))
     _DATASET = _build_dataset(cfg, Path(manifest_path))
     _EXPORT_ROOT = export_root
@@ -215,8 +224,9 @@ def main() -> None:
         max_workers=worker_count,
         initializer=_worker_init,
         initargs=(str(config_path), str(manifest_path), str(out_dir)),
+        mp_context=mp.get_context("spawn"),
     ) as executor:
-        futures = [executor.submit(_export_row_shard, row_idx) for row_idx in range(len(rows))]
+        pending = {executor.submit(_export_row_shard, row_idx) for row_idx in range(len(rows))}
         progress = None
         if use_tqdm:
             progress = tqdm(
@@ -226,16 +236,21 @@ def main() -> None:
                 mininterval=0.5,
             )
         samples_done = 0
-        for future in as_completed(futures):
-            chunk = future.result()
-            all_rows.extend(chunk)
-            samples_done += len(chunk)
+        while pending:
+            done, pending = wait(pending, timeout=2.0, return_when=FIRST_COMPLETED)
+            completed_samples = 0
             elapsed = max(time.perf_counter() - started, 1e-6)
+            for future in done:
+                chunk = future.result()
+                all_rows.extend(chunk)
+                samples_done += len(chunk)
+                completed_samples += len(chunk)
             samples_per_sec = len(all_rows) / elapsed
             samples_left = max(total_samples - samples_done, 0)
             eta_sec = samples_left * (elapsed / max(samples_done, 1))
             if use_tqdm and progress is not None:
-                progress.update(len(chunk))
+                if completed_samples:
+                    progress.update(completed_samples)
                 progress.set_postfix(
                     samples=len(all_rows),
                     workers=worker_count,
@@ -251,6 +266,7 @@ def main() -> None:
                     last_log_at=last_log_at,
                     workers=worker_count,
                     sps=round(samples_per_sec, 1),
+                    pending=len(pending),
                 )
         if progress is not None:
             progress.close()
@@ -264,6 +280,7 @@ def main() -> None:
                 force=True,
                 workers=worker_count,
                 sps=round(len(all_rows) / max(time.perf_counter() - started, 1e-6), 1),
+                pending=0,
             )
 
     all_rows.sort(key=lambda row: int(row["sample_index"]))
