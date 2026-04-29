@@ -192,6 +192,21 @@ def run_harmonizer_epoch(
                 tb_writer.add_scalar(f"{tb_prefix}/metric/{key}", value / steps, gs)
             tb_writer.flush()
         if console_log_interval > 0 and (steps == 1 or steps % console_log_interval == 0 or steps == n_batches):
+            elapsed = max(time.monotonic() - t0, 1e-6)
+            steps_per_sec = steps / elapsed
+            eta_epoch_sec = int(max(n_batches - steps, 0) / max(steps_per_sec, 1e-6))
+            eta_total_sec = None
+            if desc:
+                parts = desc.split()
+                if len(parts) >= 2 and "/" in parts[-1]:
+                    epoch_token = parts[-1]
+                    try:
+                        current_epoch, total_epochs = [int(x) for x in epoch_token.split("/", maxsplit=1)]
+                        steps_done_total = (current_epoch - 1) * n_batches + steps
+                        total_steps = total_epochs * n_batches
+                        eta_total_sec = int(max(total_steps - steps_done_total, 0) / max(steps_per_sec, 1e-6))
+                    except ValueError:
+                        eta_total_sec = None
             row: dict[str, Any] = {
                 "event": "harmonizer_step",
                 "desc": desc,
@@ -199,8 +214,12 @@ def run_harmonizer_epoch(
                 "batches": n_batches,
                 "loss_total": round(agg_losses["total"] / steps, 6),
                 "mae16": round(agg_metrics["boundary_mae_16"] / steps, 6),
-                "sec": int(time.monotonic() - t0),
+                "sec": int(elapsed),
+                "steps_per_sec": round(steps_per_sec, 3),
+                "eta_epoch_sec": eta_epoch_sec,
             }
+            if eta_total_sec is not None:
+                row["eta_total_sec"] = eta_total_sec
             if train_mode:
                 row["lowfreq"] = round(agg_metrics["lowfreq_mae"] / steps, 6)
             else:
