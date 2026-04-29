@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import shutil
+import time
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -115,12 +115,14 @@ def main() -> None:
     rows = read_jsonl(manifest_path)
     if not rows:
         raise ValueError(f"empty manifest: {manifest_path}")
+    worker_count = max(1, min(args.workers, len(rows)))
 
     global _EXPORT_ROOT
     _EXPORT_ROOT = str(out_dir)
     all_rows: list[dict] = []
+    started = time.perf_counter()
     with ProcessPoolExecutor(
-        max_workers=args.workers,
+        max_workers=worker_count,
         initializer=_worker_init,
         initargs=(str(config_path), str(manifest_path), str(out_dir)),
     ) as executor:
@@ -132,18 +134,32 @@ def main() -> None:
         )
         for chunk in progress:
             all_rows.extend(chunk)
-            progress.set_postfix(samples=len(all_rows), workers=args.workers)
+            elapsed = max(time.perf_counter() - started, 1e-6)
+            samples_per_sec = len(all_rows) / elapsed
+            rows_done = progress.n
+            rows_left = max(len(rows) - rows_done, 0)
+            eta_sec = rows_left * (elapsed / max(rows_done, 1))
+            progress.set_postfix(
+                samples=len(all_rows),
+                workers=worker_count,
+                sps=round(samples_per_sec, 1),
+                eta_s=int(eta_sec),
+            )
 
     write_jsonl(out_dir / "manifest.jsonl", all_rows)
     split_counts: dict[str, int] = {}
     for row in all_rows:
         split = str(row.get("split"))
         split_counts[split] = split_counts.get(split, 0) + 1
+    elapsed = max(time.perf_counter() - started, 1e-6)
     summary = {
         "out_dir": str(out_dir),
         "source_images": len(rows),
         "samples": len(all_rows),
         "splits": split_counts,
+        "workers": worker_count,
+        "seconds": round(elapsed, 2),
+        "samples_per_sec": round(len(all_rows) / elapsed, 2),
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False))

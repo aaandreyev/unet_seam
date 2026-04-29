@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -24,7 +25,13 @@ def _copy_one(args: tuple[Path, Path]) -> int:
 
 def _copy_tree(src_root: Path, dst_root: Path, workers: int) -> dict[str, int]:
     files = [p for p in src_root.rglob("*") if p.is_file() and p.suffix.lower() in RAW_EXTS]
+    if not files:
+        raise FileNotFoundError(
+            f"no raw source files with supported extensions {sorted(RAW_EXTS)} found under {src_root}"
+        )
+    workers = max(1, min(workers, len(files)))
     total_bytes = 0
+    started = time.perf_counter()
     with ThreadPoolExecutor(max_workers=workers) as executor:
         progress = tqdm(
             executor.map(_copy_one, ((p, dst_root / p.relative_to(src_root)) for p in files), chunksize=8),
@@ -35,7 +42,25 @@ def _copy_tree(src_root: Path, dst_root: Path, workers: int) -> dict[str, int]:
         for copied in progress:
             total_bytes += copied
             progress.set_postfix(gb=round(total_bytes / (1024**3), 2))
-    return {"files": len(files), "bytes": total_bytes}
+    elapsed = max(time.perf_counter() - started, 1e-6)
+    return {
+        "files": len(files),
+        "bytes": total_bytes,
+        "workers": workers,
+        "seconds": round(elapsed, 2),
+        "files_per_sec": round(len(files) / elapsed, 2),
+        "gb_per_sec": round((total_bytes / (1024**3)) / elapsed, 3),
+    }
+
+
+def _run_stage(cmd: list[str], *, cwd: Path, env: dict[str, str], stage_name: str) -> float:
+    print(f"[stage:start] {stage_name}", flush=True)
+    print("CMD:", " ".join(cmd), flush=True)
+    started = time.perf_counter()
+    subprocess.run(cmd, cwd=str(cwd), env=env, check=True)
+    elapsed = time.perf_counter() - started
+    print(f"[stage:done] {stage_name} in {elapsed:.2f}s", flush=True)
+    return elapsed
 
 
 def main() -> None:
@@ -52,6 +77,12 @@ def main() -> None:
     pr = args.project_root.resolve()
     raw_src = args.drive_raw_root.resolve()
     local_root = args.local_data_root.resolve()
+    if not pr.exists():
+        raise FileNotFoundError(f"project root does not exist: {pr}")
+    if not raw_src.exists():
+        raise FileNotFoundError(f"drive raw root does not exist: {raw_src}")
+    if not raw_src.is_dir():
+        raise NotADirectoryError(f"drive raw root is not a directory: {raw_src}")
     local_raw = local_root / "input_raw"
     prepared_dir = local_root / "data/source_images"
     manifest = local_root / "manifests/input_raw_manifest.jsonl"
@@ -64,56 +95,74 @@ def main() -> None:
     if local_raw.exists():
         shutil.rmtree(local_raw)
     local_raw.mkdir(parents=True, exist_ok=True)
+    print(f"[stage:start] copy_raw_sources from {raw_src} -> {local_raw}", flush=True)
     copy_stats = _copy_tree(raw_src, local_raw, workers=args.copy_workers)
+    print(f"[stage:done] copy_raw_sources {json.dumps(copy_stats, ensure_ascii=False)}", flush=True)
 
     py = sys.executable
-    subprocess.run(
-        [
-            py,
-            "-m",
-            "scripts.prepare_source",
-            "--input",
-            str(local_raw),
-            "--output",
-            str(prepared_dir),
-            "--manifest",
-            str(manifest),
-            "--excluded-log",
-            str(excluded),
-            "--workers",
-            str(args.prepare_workers),
-        ],
-        cwd=str(pr),
-        check=True,
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(pr) if not env.get("PYTHONPATH") else f"{str(pr)}{os.pathsep}{env['PYTHONPATH']}"
+    stage_timings = {}
+    stage_timings["prepare_source_sec"] = round(
+        _run_stage(
+            [
+                py,
+                "-m",
+                "scripts.prepare_source",
+                "--input",
+                str(local_raw),
+                "--output",
+                str(prepared_dir),
+                "--manifest",
+                str(manifest),
+                "--excluded-log",
+                str(excluded),
+                "--workers",
+                str(args.prepare_workers),
+            ],
+            cwd=pr,
+            env=env,
+            stage_name="prepare_source",
+        ),
+        2,
     )
-    subprocess.run(
-        [py, "-m", "scripts.build_split", "--manifest", str(manifest)],
-        cwd=str(pr),
-        check=True,
+    stage_timings["build_split_sec"] = round(
+        _run_stage(
+            [py, "-m", "scripts.build_split", "--manifest", str(manifest)],
+            cwd=pr,
+            env=env,
+            stage_name="build_split",
+        ),
+        2,
     )
-    subprocess.run(
-        [
-            py,
-            "-m",
-            "scripts.materialize_synthetic_dataset",
-            "--config",
-            str(pr / "configs" / args.train_config_name),
-            "--manifest",
-            str(manifest),
-            "--out",
-            str(materialized_root),
-            "--workers",
-            str(args.materialize_workers),
-            "--overwrite",
-        ],
-        cwd=str(pr),
-        check=True,
+    stage_timings["materialize_dataset_sec"] = round(
+        _run_stage(
+            [
+                py,
+                "-m",
+                "scripts.materialize_synthetic_dataset",
+                "--config",
+                str(pr / "configs" / args.train_config_name),
+                "--manifest",
+                str(manifest),
+                "--out",
+                str(materialized_root),
+                "--workers",
+                str(args.materialize_workers),
+                "--overwrite",
+            ],
+            cwd=pr,
+            env=env,
+            stage_name="materialize_synthetic_dataset",
+        ),
+        2,
     )
     summary = {
         "raw_copy": copy_stats,
         "prepared_manifest": str(manifest),
         "materialized_manifest": str(materialized_root / "manifest.jsonl"),
         "materialized_root": str(materialized_root),
+        "stage_timings_sec": stage_timings,
     }
     print(json.dumps(summary, ensure_ascii=False))
 
