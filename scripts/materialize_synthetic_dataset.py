@@ -6,7 +6,7 @@ import os
 import shutil
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -157,25 +157,27 @@ def main() -> None:
         initializer=_worker_init,
         initargs=(str(config_path), str(manifest_path), str(out_dir)),
     ) as executor:
-        iterator = executor.map(_export_row, range(len(rows)), chunksize=1)
+        futures = [executor.submit(_export_row, row_idx) for row_idx in range(len(rows))]
+        progress = None
         if use_tqdm:
-            iterator = tqdm(
-                iterator,
+            progress = tqdm(
                 total=len(rows),
                 desc="materialize_dataset",
                 dynamic_ncols=True,
                 mininterval=0.5,
             )
         rows_done = 0
-        for chunk in iterator:
+        for future in as_completed(futures):
+            chunk = future.result()
             all_rows.extend(chunk)
             rows_done += 1
             elapsed = max(time.perf_counter() - started, 1e-6)
             samples_per_sec = len(all_rows) / elapsed
             rows_left = max(len(rows) - rows_done, 0)
             eta_sec = rows_left * (elapsed / max(rows_done, 1))
-            if use_tqdm:
-                iterator.set_postfix(
+            if use_tqdm and progress is not None:
+                progress.update(1)
+                progress.set_postfix(
                     samples=len(all_rows),
                     workers=worker_count,
                     sps=round(samples_per_sec, 1),
@@ -192,7 +194,9 @@ def main() -> None:
                     workers=worker_count,
                     sps=round(samples_per_sec, 1),
                 )
-        if not use_tqdm:
+        if progress is not None:
+            progress.close()
+        elif rows_done != len(rows):
             _maybe_log_plain_progress(
                 label="materialize_dataset",
                 done=len(rows),
@@ -205,6 +209,7 @@ def main() -> None:
                 sps=round(len(all_rows) / max(time.perf_counter() - started, 1e-6), 1),
             )
 
+    all_rows.sort(key=lambda row: int(row["sample_index"]))
     write_jsonl(out_dir / "manifest.jsonl", all_rows)
     split_counts: dict[str, int] = {}
     for row in all_rows:

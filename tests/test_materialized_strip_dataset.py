@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -98,4 +99,7 @@ def test_materialize_script_exports_manifest_and_triplets(tmp_path: Path) -> Non
     assert (out_dir / "inputs/00000000.png").exists()
     assert (out_dir / "targets/00000000.png").exists()
     assert (out_dir / "masks/00000000.png").exists()
-
+    summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["workers"] == 1
+    assert rows[0]["sample_index"] == 0
+    assert rows[1]["sample_index"] == 1

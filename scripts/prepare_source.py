@@ -4,7 +4,7 @@ import argparse
 import os
 import sys
 import time
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 from src.data.manifest import append_jsonl, write_jsonl
@@ -73,24 +73,26 @@ def main() -> None:
     started = time.perf_counter()
     last_log_at = started
     with ProcessPoolExecutor(max_workers=args.workers) as executor:
-        iterator = executor.map(_prepare_one, tasks, chunksize=args.chunksize)
+        futures = [executor.submit(_prepare_one, task) for task in tasks]
+        progress = None
         if use_tqdm:
-            iterator = tqdm(
-                iterator,
+            progress = tqdm(
                 total=len(tasks),
                 desc="prepare_source",
                 dynamic_ncols=True,
                 mininterval=0.5,
             )
         done = 0
-        for result in iterator:
+        for future in as_completed(futures):
+            result = future.result()
             done += 1
             if result["row"]:
                 rows.append(result["row"])
             if result["excluded"]:
                 excluded_rows.append(result["excluded"])
-            if use_tqdm:
-                iterator.set_postfix(valid=len(rows), excluded=len(excluded_rows), workers=args.workers)
+            if use_tqdm and progress is not None:
+                progress.update(1)
+                progress.set_postfix(valid=len(rows), excluded=len(excluded_rows), workers=args.workers)
             else:
                 last_log_at = _maybe_log_plain_progress(
                     done=done,
@@ -101,7 +103,9 @@ def main() -> None:
                     excluded=len(excluded_rows),
                     workers=args.workers,
                 )
-        if not use_tqdm:
+        if progress is not None:
+            progress.close()
+        elif done != len(tasks):
             _maybe_log_plain_progress(
                 done=len(tasks),
                 total=len(tasks),
