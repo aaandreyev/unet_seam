@@ -97,10 +97,16 @@ def test_profile_guard_suppresses_long_smooth_stripe():
     mask = torch.zeros(1, 1, 128, 128)
     mask[:, :, 16:112, 16:112] = 1.0
     bbox = (16, 16, 112, 112)
-    merged[:, :, 16:112, 16:28] = 0.06
+    # Fill the whole inner so all four side samplers see the same flat profile (no false 1.0
+    # from empty opposing bands when full_guard averages per-side patches).
+    merged[:, :, 16:112, 16:112] = 0.06
     guard, side_guards, stats = _build_profile_guard(merged, mask, bbox, band_px=12)
-    assert float(guard[:, :, 16:112, 16:28].mean()) < 0.8
-    assert float(side_guards["left"][:, :, 16:112, 16:28].mean()) < 0.8
+    # Row along the middle of the inner: guard should stay low for a flat stripe across the
+    # full inner width (not rebound to ~1 just past band_px when the patch ended at 24px).
+    row = guard[0, 0, 64, 16:112]
+    assert float(row[8]) > float(row[72]), "seam column should stay more open than deep band"
+    assert float(max(row[18:24]) - min(row[24:32])) < 0.12, "no spike across old band_px edge"
+    assert float(side_guards["left"][0, 0, 64, 16 + 72]) < 0.82
     assert stats["left"]["profile_signal_mean"] > 0.02
 
 

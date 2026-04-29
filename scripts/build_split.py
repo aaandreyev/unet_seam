@@ -26,7 +26,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", default="manifests/input_raw_manifest.jsonl")
     args = parser.parse_args()
-    rows = read_jsonl(Path(args.manifest))
+    manifest_path = Path(args.manifest)
+    rows = read_jsonl(manifest_path)
     clusters = cluster_rows(rows)
     random.Random(42).shuffle(clusters)
     n = len(clusters)
@@ -37,9 +38,10 @@ def main() -> None:
         for row in cluster:
             row["cluster_id"] = idx
             row["split"] = split
-    write_jsonl(Path("manifests/input_raw_manifest.jsonl"), rows)
+    write_jsonl(manifest_path, rows)
+    manifest_dir = manifest_path.parent
     for split in ("train", "val", "bench"):
-        write_jsonl(Path(f"manifests/source_{split}.jsonl"), [row for row in rows if row["split"] == split])
+        write_jsonl(manifest_dir / f"source_{split}.jsonl", [row for row in rows if row["split"] == split])
 
 
 if __name__ == "__main__":

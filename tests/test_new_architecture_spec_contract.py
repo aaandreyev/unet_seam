@@ -5,7 +5,7 @@ import torch
 from PIL import Image
 
 from comfy_node import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
-from src.data.corruptions import GROUPS, apply_random_corruptions
+from src.data.corruptions import GROUPS, _apply_corruption_op, _build_artifact_field_bank, apply_random_corruptions
 from src.data.harmonizer_input import build_harmonizer_input
 from src.data.manifest import write_jsonl
 from src.data.synthetic_strip_dataset import SyntheticStripDataset
@@ -82,6 +82,16 @@ def test_spec_synthetic_corruption_families_and_probabilities():
         d_hits += int(any(op in GROUPS["D"] for op in result.ops))
     assert 0.35 <= c_hits / 200.0 <= 0.65
     assert 0.08 <= d_hits / 200.0 <= 0.32
+
+
+def test_spatial_twin_of_brightness_is_nonuniform():
+    inner = torch.full((1, 3, 64, 64), 0.5)
+    generator = torch.Generator().manual_seed(7)
+    fields = _build_artifact_field_bank(inner.shape, generator)
+    result = _apply_corruption_op("brightness", inner, generator, fields, use_spatial=True)
+    luma = result.mean(dim=1)
+    assert float(luma.std()) > 1e-3
+    assert not torch.allclose(luma[:, :, :16], luma[:, :, -16:], atol=1e-4)
 
 
 def test_spec_synthetic_dataset_builds_v3_input(tmp_path: Path):

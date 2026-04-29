@@ -12,6 +12,7 @@ from torch.amp import GradScaler
 from torch.utils.data import ConcatDataset, DataLoader, WeightedRandomSampler
 
 from src.data.gpu_corruptions import GPUCorruption
+from src.data.materialized_strip_dataset import MaterializedStripDataset
 from src.data.real_strip_dataset import RealPairedStripDataset
 from src.data.strip_geometry import StripSpec
 from src.data.synthetic_strip_dataset import SyntheticStripDataset, collate_strip_batch
@@ -102,6 +103,14 @@ def _load_matching_state(module: torch.nn.Module, state_dict: dict[str, torch.Te
 
 def _build_dataset(cfg: dict[str, Any], split: str, apply_corruption: bool = True) -> SyntheticStripDataset:
     dcfg = cfg["dataset"]
+    materialized_manifest = dcfg.get("materialized_manifest")
+    if materialized_manifest:
+        return MaterializedStripDataset(
+            Path(materialized_manifest),
+            split=split,
+            boundary_band_px=int(dcfg.get("boundary_band_px", 24)),
+            preload=bool(dcfg.get("materialized_preload", False)),
+        )
     spec = StripSpec(
         strip_height=int(dcfg.get("strip_height", 1024)),
         outer_width=int(dcfg.get("outer_width", 128)),
@@ -212,6 +221,7 @@ def main() -> None:
         blocks=tuple(model_cfg.get("blocks", [2, 2, 4, 6])),
         outer_width=int(cfg["dataset"].get("outer_width", 128)),
         boundary_band_px=int(cfg["dataset"].get("boundary_band_px", 24)),
+        correction_limits=model_cfg.get("correction_limits"),
     ).to(device)
     if device.type == "cuda":
         model = model.to(memory_format=torch.channels_last)
@@ -222,7 +232,8 @@ def main() -> None:
     val_bs = int(train_cfg.get("val_batch_size", train_cfg["batch_size"]))
     if device.type == "cuda":
         _assert_batch_within_cuda_index_limit(model.channels[0], strip_h, strip_w, train_bs, val_bs)
-    gpu_corruption = GPUCorruption().to(device) if device.type == "cuda" else None
+    materialized_manifest = cfg["dataset"].get("materialized_manifest")
+    gpu_corruption = GPUCorruption().to(device) if device.type == "cuda" and not materialized_manifest else None
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(train_cfg["lr"]),

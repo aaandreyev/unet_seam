@@ -19,6 +19,8 @@ def main() -> None:
     ap.add_argument("--train-num-workers", type=int, required=True)
     ap.add_argument("--primary-checkpoint", type=str, default="best_harmonizer_quality.pt")
     ap.add_argument("--train-config-name", type=str, default="train_harmonizer_v1.yaml")
+    ap.add_argument("--materialized-manifest", type=Path, default=None)
+    ap.add_argument("--materialized-preload", action="store_true")
     args = ap.parse_args()
     pr: Path = args.project_root
     dr: Path = args.data_root
@@ -32,6 +34,9 @@ def main() -> None:
     eval_cfg = yaml.safe_load((pr / "configs" / "eval_harmonizer_v1.yaml").read_text(encoding="utf-8"))
     export_cfg = yaml.safe_load((pr / "configs" / "export_harmonizer_v1.yaml").read_text(encoding="utf-8"))
     train_cfg["dataset"]["source_manifest"] = str(dr / "manifests" / "input_raw_manifest.jsonl")
+    if args.materialized_manifest is not None:
+        train_cfg["dataset"]["materialized_manifest"] = str(args.materialized_manifest)
+        train_cfg["dataset"]["materialized_preload"] = bool(args.materialized_preload)
     train_cfg["train"]["batch_size"] = args.train_batch_size
     train_cfg["train"]["val_batch_size"] = args.val_batch_size
     train_cfg["train"]["num_epochs"] = args.train_epochs
@@ -40,6 +45,8 @@ def main() -> None:
     eval_cfg["report_root"] = str(local_eval)
     eval_cfg["batch_size"] = args.val_batch_size
     eval_cfg["source_manifest"] = str(dr / "manifests" / "input_raw_manifest.jsonl")
+    if args.materialized_manifest is not None:
+        eval_cfg["materialized_manifest"] = str(args.materialized_manifest)
     export_cfg["checkpoint"] = str(local_ckpt / args.primary_checkpoint)
     export_cfg["export_root"] = str(local_export)
     (cfg_dir / "train.yaml").write_text(yaml.safe_dump(train_cfg, sort_keys=False), encoding="utf-8")

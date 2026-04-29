@@ -117,7 +117,11 @@ def _build_safety_gate(
 
     row_worse = worse_ratio.mean(dim=-1, keepdim=True)
     xs = torch.arange(inner_width, device=canonical_strip.device, dtype=canonical_strip.dtype).view(1, 1, 1, inner_width)
-    decay = torch.exp(-xs / max(float(band), 1.0))
+    # Lift the row-level safety damp away from the seam so the seam itself stays
+    # correctable when the row-aggregated worse_ratio is non-zero.  The first `band`
+    # pixels are still gated by the per-pixel `band_safety` below, which is the
+    # accurate local check for "did the model worsen the seam here?".
+    decay = 1.0 - torch.exp(-xs / max(float(band), 1.0))
     row_safety = 1.0 - 0.75 * row_worse * decay
     full_safety = row_safety.expand(1, 1, canonical_strip.shape[-2], inner_width).clone()
     full_safety[..., :band] = torch.minimum(full_safety[..., :band], band_safety)
@@ -143,7 +147,10 @@ def _row_guard_from_profile(profile: torch.Tensor) -> tuple[torch.Tensor, torch.
     dy = (smoothed[..., 1:] - smoothed[..., :-1]).abs()
     dy = F.pad(dy, (1, 0), mode="replicate")
     flatness = 1.0 - (dy / (smoothed + 0.01) * 3.0).clamp(0.0, 1.0)
-    strength = ((smoothed - 0.010) / 0.030).clamp(0.0, 1.0)
+    # Higher trigger threshold so weak profile signals (~0.05) don't suppress
+    # 30%+ of the correction along the whole side.  Now requires a clearly
+    # large flat-profile delta before the global tonal-shift damp kicks in.
+    strength = ((smoothed - 0.030) / 0.060).clamp(0.0, 1.0)
     guard = 1.0 - 0.55 * flatness * strength
     return guard.clamp(0.35, 1.0), smoothed
 
@@ -155,9 +162,24 @@ def _expand_row_guard(
     dtype: torch.dtype,
 ) -> torch.Tensor:
     xs = torch.arange(width, device=device, dtype=dtype).view(1, 1, 1, width)
-    decay = 0.35 + 0.65 * torch.exp(-xs / max(width * 0.45, 1.0))
+    # Suppression weakest at the seam (xs=0), strongest deep inside the inner band.
+    # Lets the seam itself receive full correction while still damping flat-profile
+    # global tonal shifts further from the seam.
+    decay = 0.35 + 0.65 * (1.0 - torch.exp(-xs / max(width * 0.45, 1.0)))
     row_guard = row_guard.unsqueeze(-1)
     return (1.0 - (1.0 - row_guard) * decay).clamp(0.35, 1.0)
+
+
+def _expand_col_guard(
+    col_guard: torch.Tensor,
+    height: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Same as row expansion along the seam→inner axis for top/bottom patches (H×W layout)."""
+    ys = torch.arange(height, device=device, dtype=dtype).view(1, 1, height, 1)
+    decay = 0.35 + 0.65 * (1.0 - torch.exp(-ys / max(height * 0.45, 1.0)))
+    return (1.0 - (1.0 - col_guard.unsqueeze(-2)) * decay).clamp(0.35, 1.0)
 
 
 def _build_profile_guard(
@@ -166,12 +188,22 @@ def _build_profile_guard(
     bbox: tuple[int, int, int, int],
     *,
     band_px: int = 24,
+    inner_width: int | None = None,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor], dict[str, dict[str, float]]]:
+    """Per-side profile from ``band_px`` near the seam; guard maps span ``inner_width`` into the bbox."""
     x0, y0, x1, y1 = bbox
-    h = merged.shape[-2]
-    w = merged.shape[-1]
     delta_mag = merged.abs().mean(dim=1, keepdim=True) * mask
-    full_guard = torch.ones_like(mask)
+    bw, bh = max(x1 - x0, 0), max(y1 - y0, 0)
+    # Depth of the harmonizer band along each side (same cap as strip placement).
+    iw = int(inner_width) if inner_width is not None else max(bw, bh)
+    left_span = min(iw, bw)
+    top_span = min(iw, bh)
+    sample_w = min(int(band_px), left_span) if left_span > 0 else 0
+    sample_h = min(int(band_px), top_span) if top_span > 0 else 0
+    # Running sum/count so perimeter overlaps (e.g. corners) use a mean, not a harsh minimum
+    # that over-suppresses the merged delta in corners and looks like a “gap” before the fix.
+    acc_guard = torch.zeros_like(mask)
+    acc_count = torch.zeros_like(mask)
     side_guards: dict[str, torch.Tensor] = {}
     stats: dict[str, dict[str, float]] = {}
 
@@ -180,42 +212,46 @@ def _build_profile_guard(
         patch = torch.ones_like(mask)
         patch[:, :, ry0:ry1, rx0:rx1] = guard_patch
         side_guards[side] = patch
-        full_guard.copy_(torch.minimum(full_guard, patch))
+        acc_guard[:, :, ry0:ry1, rx0:rx1] = acc_guard[:, :, ry0:ry1, rx0:rx1] + guard_patch
+        acc_count[:, :, ry0:ry1, rx0:rx1] = acc_count[:, :, ry0:ry1, rx0:rx1] + 1.0
         stats[side] = {
             "profile_guard_mean": float(guard_patch.mean().item()),
             "profile_signal_mean": float(signal_patch.mean().item()),
         }
 
-    left_band = min(band_px, max(x1 - x0, 0))
-    if left_band > 0:
-        patch = delta_mag[:, :, y0:y1, x0 : x0 + left_band]
+    left_band = max(left_span, 0)
+    if left_band > 0 and sample_w > 0:
+        patch = delta_mag[:, :, y0:y1, x0 : x0 + sample_w]
         profile = patch.mean(dim=-1)
         row_guard, signal = _row_guard_from_profile(profile)
         guard_patch = _expand_row_guard(row_guard, left_band, merged.device, merged.dtype)
         merge_side_guard("left", guard_patch, signal, (x0, y0, x0 + left_band, y1))
 
-        patch = delta_mag[:, :, y0:y1, x1 - left_band : x1]
+        patch = delta_mag[:, :, y0:y1, x1 - sample_w : x1]
         profile = patch.mean(dim=-1)
         row_guard, signal = _row_guard_from_profile(profile)
         guard_patch = torch.flip(_expand_row_guard(row_guard, left_band, merged.device, merged.dtype), dims=(-1,))
         merge_side_guard("right", guard_patch, signal, (x1 - left_band, y0, x1, y1))
 
-    top_band = min(band_px, max(y1 - y0, 0))
-    if top_band > 0:
-        patch = delta_mag[:, :, y0 : y0 + top_band, x0:x1]
+    top_band = max(top_span, 0)
+    if top_band > 0 and sample_h > 0:
+        patch = delta_mag[:, :, y0 : y0 + sample_h, x0:x1]
         profile = patch.mean(dim=-2)
         col_guard, signal = _row_guard_from_profile(profile)
-        ys = torch.arange(top_band, device=merged.device, dtype=merged.dtype).view(1, 1, top_band, 1)
-        decay = 0.35 + 0.65 * torch.exp(-ys / max(top_band * 0.45, 1.0))
-        guard_patch = (1.0 - (1.0 - col_guard.unsqueeze(-2)) * decay).clamp(0.35, 1.0)
+        guard_patch = _expand_col_guard(col_guard, top_band, merged.device, merged.dtype)
         merge_side_guard("top", guard_patch, signal, (x0, y0, x1, y0 + top_band))
 
-        patch = delta_mag[:, :, y1 - top_band : y1, x0:x1]
+        patch = delta_mag[:, :, y1 - sample_h : y1, x0:x1]
         profile = patch.mean(dim=-2)
         col_guard, signal = _row_guard_from_profile(profile)
-        guard_patch = torch.flip((1.0 - (1.0 - col_guard.unsqueeze(-2)) * decay).clamp(0.35, 1.0), dims=(-2,))
+        guard_patch = torch.flip(_expand_col_guard(col_guard, top_band, merged.device, merged.dtype), dims=(-2,))
         merge_side_guard("bottom", guard_patch, signal, (x0, y1 - top_band, x1, y1))
 
+    full_guard = torch.where(
+        acc_count > 0.0,
+        (acc_guard / acc_count.clamp_min(1.0)).clamp(0.35, 1.0),
+        torch.ones_like(mask),
+    )
     return full_guard * mask + (1.0 - mask), side_guards, stats
 
 
@@ -228,13 +264,14 @@ def apply_corrector_to_full_frame(
     inner_width: int,
     strength: float = 1.0,
     structural_gate: bool = True,
+    corner_disagreement_threshold: float = 0.03,
 ) -> tuple[torch.Tensor, dict]:
     if strength < 0.0 or strength > 10.0:
         raise RuntimeError("strength must be in [0, 10]")
     outputs = extract_active_strips(image[0], bbox, sides, inner_width)
     side_deltas: dict[str, torch.Tensor] = {}
     side_confidences: dict[str, torch.Tensor] = {}
-    debug = {"per_side": {}}
+    debug = {"per_side": {}, "corner_disagreement_threshold": float(corner_disagreement_threshold)}
     side_order = list(outputs.keys())
     if not side_order:
         return image, {"per_side": {}, "weights": {}, "side_deltas": {}, "merged_delta": torch.zeros_like(image)}
@@ -292,12 +329,20 @@ def apply_corrector_to_full_frame(
         debug.setdefault("side_safety_gates", {})[side] = _place_inner_map(safety_gate.to(image.device), image, bbox, side, inner_width, meta)
         debug.setdefault("side_before_error", {})[side] = _place_inner_map(_expand_band_map(before_err, inner_width).to(image.device), image, bbox, side, inner_width, meta)
         debug.setdefault("side_after_error", {})[side] = _place_inner_map(_expand_band_map(after_err, inner_width).to(image.device), image, bbox, side, inner_width, meta)
-    merged, weights = merge_side_deltas(side_deltas, mask, side_confidences=side_confidences)
+    merged, weights = merge_side_deltas(
+        side_deltas,
+        mask,
+        side_confidences=side_confidences,
+        bbox=bbox,
+        inner_width=inner_width,
+        corner_disagreement_threshold=corner_disagreement_threshold,
+    )
     profile_guard, side_profile_guards, profile_stats = _build_profile_guard(
         merged,
         mask,
         bbox,
         band_px=min(boundary_band_px, inner_width),
+        inner_width=inner_width,
     )
     merged = merged * profile_guard
     for side, side_stats in profile_stats.items():

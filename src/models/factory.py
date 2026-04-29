@@ -18,4 +18,5 @@ def build_model_from_config(cfg: dict[str, Any]) -> torch.nn.Module:
         blocks=tuple(model_cfg.get("blocks", [2, 2, 4, 6])),
         outer_width=int((cfg.get("strip") or {}).get("outer_width", 128)),
         boundary_band_px=int((cfg.get("strip") or {}).get("boundary_band_px", 24)),
+        correction_limits=model_cfg.get("correction_limits"),
     )

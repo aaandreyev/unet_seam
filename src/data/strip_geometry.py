@@ -80,6 +80,20 @@ def _replicate_pad_strip(strip: torch.Tensor, target_width: int) -> tuple[torch.
     return padded, edge_padded
 
 
+def _strip_origin_along_axis(bbox_start: int, image_extent: int, strip_len: int) -> int:
+    """
+    Place a length-``strip_len`` window so it covers the bbox from the top/left first.
+    Centering the window on the bbox used to leave uncovered bands along each side (false
+    “inner padding” in the corrected band) when bbox height/width did not match strip_len.
+    """
+    if strip_len <= 0 or image_extent <= 0:
+        return 0
+    if strip_len >= image_extent:
+        return 0
+    max_start = image_extent - strip_len
+    return int(min(max(0, bbox_start), max_start))
+
+
 def extract_side_strip(
     image: torch.Tensor,
     bbox: tuple[int, int, int, int],
@@ -91,23 +105,20 @@ def extract_side_strip(
     _, h, w = image.shape
     x0, y0, x1, y1 = bbox
     if side == "left":
-        y_center = (y0 + y1) // 2
-        y_start = max(0, min(h - spec.strip_height, y_center - spec.strip_height // 2))
+        y_start = _strip_origin_along_axis(y0, h, spec.strip_height)
         outer = image[:, y_start : y_start + spec.strip_height, max(0, x0 - spec.outer_width) : x0]
         inner = image[:, y_start : y_start + spec.strip_height, x0 : min(w, x0 + spec.inner_width)]
         strip = torch.cat([outer, inner], dim=-1)
         strip, edge_padded = _replicate_pad_strip(strip, spec.width)
     elif side == "right":
-        y_center = (y0 + y1) // 2
-        y_start = max(0, min(h - spec.strip_height, y_center - spec.strip_height // 2))
+        y_start = _strip_origin_along_axis(y0, h, spec.strip_height)
         inner = image[:, y_start : y_start + spec.strip_height, max(0, x1 - spec.inner_width) : x1]
         outer = image[:, y_start : y_start + spec.strip_height, x1 : min(w, x1 + spec.outer_width)]
         strip = torch.cat([inner, outer], dim=-1)
         strip, edge_padded = _replicate_pad_strip(strip, spec.width)
         strip = canonicalize_strip(strip, "right")
     elif side == "top":
-        x_center = (x0 + x1) // 2
-        x_start = max(0, min(w - spec.strip_height, x_center - spec.strip_height // 2))
+        x_start = _strip_origin_along_axis(x0, w, spec.strip_height)
         outer = image[:, max(0, y0 - spec.outer_width) : y0, x_start : x_start + spec.strip_height]
         inner = image[:, y0 : min(h, y0 + spec.inner_width), x_start : x_start + spec.strip_height]
         strip = torch.cat([outer, inner], dim=-2)
@@ -115,8 +126,7 @@ def extract_side_strip(
         edge_padded = max(spec.width - strip.shape[-2], 0)
         strip = canonicalize_strip(strip, "top")
     elif side == "bottom":
-        x_center = (x0 + x1) // 2
-        x_start = max(0, min(w - spec.strip_height, x_center - spec.strip_height // 2))
+        x_start = _strip_origin_along_axis(x0, w, spec.strip_height)
         inner = image[:, max(0, y1 - spec.inner_width) : y1, x_start : x_start + spec.strip_height]
         outer = image[:, y1 : min(h, y1 + spec.outer_width), x_start : x_start + spec.strip_height]
         strip = torch.cat([inner, outer], dim=-2)

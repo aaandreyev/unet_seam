@@ -28,6 +28,7 @@ class SeamHarmonizerV3Node:
                 "model_path": ("STRING", {"default": default_model}),
                 "inner_width": ("INT", {"default": 128}),
                 "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0}),
+                "corner_disagreement_threshold": ("FLOAT", {"default": 0.03, "min": 0.0, "max": 0.2, "step": 0.005}),
                 "process_left": ("BOOLEAN", {"default": True}),
                 "process_right": ("BOOLEAN", {"default": True}),
                 "process_top": ("BOOLEAN", {"default": True}),
@@ -44,7 +45,20 @@ class SeamHarmonizerV3Node:
     def _debug_root() -> Path:
         return Path.cwd() / "outputs" / "debug_previews"
 
-    def run(self, IMAGE, MASK, model_path, inner_width, strength, process_left, process_right, process_top, process_bottom, debug_previews):
+    def run(
+        self,
+        IMAGE,
+        MASK,
+        model_path,
+        inner_width,
+        strength,
+        corner_disagreement_threshold,
+        process_left,
+        process_right,
+        process_top,
+        process_bottom,
+        debug_previews,
+    ):
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model, sidecar = load_model(model_path, device=device)
         if inner_width not in sidecar["strip"]["supported_inner_widths"]:
@@ -69,6 +83,7 @@ class SeamHarmonizerV3Node:
             "mask_mean": float(mask.mean().item()),
             "inner_width": int(inner_width),
             "strength": float(strength),
+            "corner_disagreement_threshold": float(corner_disagreement_threshold),
             "model_path": str(model_path),
             "original_mask_shape": original_mask_shape,
             "image_shape_hw": image_hw,
@@ -97,7 +112,16 @@ class SeamHarmonizerV3Node:
             raise RuntimeError(
                 "No processable sides found. After resizing, the mask bbox touches all image borders, so there is no outer context band for seam harmonization."
             )
-        corrected, debug = apply_corrector_to_full_frame(model, image, mask, bbox, sides, inner_width, strength)
+        corrected, debug = apply_corrector_to_full_frame(
+            model,
+            image,
+            mask,
+            bbox,
+            sides,
+            inner_width,
+            strength,
+            corner_disagreement_threshold=corner_disagreement_threshold,
+        )
         if debug_previews:
             self._write_debug(debug, image, corrected, extra={**base_meta, "sides": sides})
         corrected[:, :, :, :x0] = image[:, :, :, :x0]

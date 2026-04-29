@@ -9,6 +9,7 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
+from src.data.materialized_strip_dataset import MaterializedStripDataset
 from src.data.strip_geometry import StripSpec
 from src.data.synthetic_strip_dataset import SyntheticStripDataset, collate_strip_batch
 from src.losses.harmonizer_losses import HarmonizerLossComputer
@@ -20,6 +21,14 @@ from src.utils.device import pick_device
 
 def _build_dataset(train_cfg: dict[str, Any], eval_cfg: dict[str, Any]) -> SyntheticStripDataset:
     dcfg = dict(train_cfg.get("dataset") or {})
+    materialized_manifest = eval_cfg.get("materialized_manifest") or dcfg.get("materialized_manifest")
+    if materialized_manifest:
+        return MaterializedStripDataset(
+            Path(materialized_manifest),
+            split="val",
+            boundary_band_px=int(dcfg.get("boundary_band_px", 24)),
+            preload=bool(dcfg.get("materialized_preload", False)),
+        )
     dcfg["source_manifest"] = eval_cfg.get("source_manifest", dcfg.get("source_manifest"))
     return SyntheticStripDataset(
         Path(dcfg["source_manifest"]),
@@ -53,6 +62,7 @@ def main() -> None:
         blocks=tuple(model_cfg.get("blocks", [2, 2, 4, 6])),
         outer_width=int(dataset_cfg.get("outer_width", 128)),
         boundary_band_px=int(dataset_cfg.get("boundary_band_px", 24)),
+        correction_limits=model_cfg.get("correction_limits"),
     ).to(device)
     try:
         model.load_state_dict(ckpt["ema"])

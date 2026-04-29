@@ -25,6 +25,7 @@ def main() -> None:
     parser.add_argument("--excluded-log", default="outputs/eval_reports/excluded_sources.jsonl")
     parser.add_argument("--workers", type=int, default=max(1, (os.cpu_count() or 4) - 1))
     parser.add_argument("--chunksize", type=int, default=8)
+    parser.add_argument("--limit", type=int, default=None)
     args = parser.parse_args()
 
     input_dir = Path(args.input)
@@ -32,6 +33,10 @@ def main() -> None:
     rows = []
     excluded_rows = []
     files = list(iter_image_files(input_dir))
+    if args.limit is not None:
+        if args.limit <= 0:
+            raise ValueError("--limit must be > 0")
+        files = files[: args.limit]
     tasks = [(path, output_dir, f"{idx:06d}") for idx, path in enumerate(files)]
     with ProcessPoolExecutor(max_workers=args.workers) as executor:
         progress = tqdm(

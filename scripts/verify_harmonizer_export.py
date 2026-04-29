@@ -20,6 +20,7 @@ def _build_from_sidecar(sidecar: dict) -> SeamHarmonizerV3:
         blocks=tuple(arch["blocks"]),
         outer_width=sidecar["strip"]["outer_width"],
         boundary_band_px=sidecar["strip"].get("boundary_band_px", 24),
+        correction_limits=arch.get("correction_limits"),
     )
 
 

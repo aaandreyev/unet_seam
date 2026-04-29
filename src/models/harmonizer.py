@@ -8,6 +8,16 @@ from src.models.blocks import FiLMGenerator
 from src.models.harmonizer_blocks import NAFBlockLite, NAFEncoderLite, resize_inner
 
 
+DEFAULT_CORRECTION_LIMITS = {
+    "gain_limit": 1.80,
+    "gamma_limit": 1.80,
+    "bias_limit": 0.50,
+    "mix_limit": 0.90,
+    "detail_limit": 0.35,
+    "gate_bias": -0.10,
+}
+
+
 def _identity_color_matrix(batch: int, height: int, width: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     eye = torch.eye(3, device=device, dtype=dtype).view(1, 3, 3, 1, 1)
     return eye.expand(batch, 3, 3, height, width)
@@ -22,12 +32,12 @@ def reconstruct_corrected_strip(
     outputs: dict[str, torch.Tensor],
     *,
     outer_width: int = 128,
-    gain_limit: float = 0.35,
-    gamma_limit: float = 0.30,
-    bias_limit: float = 0.10,
-    mix_limit: float = 0.12,
-    detail_limit: float = 0.05,
-    gate_bias: float = -4.0,
+    gain_limit: float = DEFAULT_CORRECTION_LIMITS["gain_limit"],
+    gamma_limit: float = DEFAULT_CORRECTION_LIMITS["gamma_limit"],
+    bias_limit: float = DEFAULT_CORRECTION_LIMITS["bias_limit"],
+    mix_limit: float = DEFAULT_CORRECTION_LIMITS["mix_limit"],
+    detail_limit: float = DEFAULT_CORRECTION_LIMITS["detail_limit"],
+    gate_bias: float = DEFAULT_CORRECTION_LIMITS["gate_bias"],
 ) -> dict[str, torch.Tensor]:
     height = strip_rgb.shape[-2]
     inner_width = strip_rgb.shape[-1] - outer_width
@@ -102,6 +112,7 @@ class SeamHarmonizerV3(nn.Module):
         blocks: tuple[int, ...] = (2, 2, 4, 6),
         outer_width: int = 128,
         boundary_band_px: int = 24,
+        correction_limits: dict[str, float] | None = None,
     ) -> None:
         super().__init__()
         self.in_channels = in_channels
@@ -109,6 +120,9 @@ class SeamHarmonizerV3(nn.Module):
         self.blocks = blocks
         self.outer_width = outer_width
         self.boundary_band_px = boundary_band_px
+        self.correction_limits = dict(DEFAULT_CORRECTION_LIMITS)
+        if correction_limits:
+            self.correction_limits.update({k: float(v) for k, v in correction_limits.items()})
         self.encoder = NAFEncoderLite(in_channels=in_channels, channels=channels, blocks=blocks)
         self.bottleneck = nn.Sequential(NAFBlockLite(channels[-1]), NAFBlockLite(channels[-1]))
         self.decode2 = DecoderFuse(channels[-1], channels[2], channels[2])
@@ -164,6 +178,7 @@ class SeamHarmonizerV3(nn.Module):
                 "gate_lowres": gate_lowres,
             },
             outer_width=self.outer_width,
+            **self.correction_limits,
         )
         return {
             "gain_lowres": gain_lowres,

@@ -12,3 +12,4 @@ venv/
 .DS_Store
 *.safetensors
 *.pt
+/data/

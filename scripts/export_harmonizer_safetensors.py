@@ -30,6 +30,7 @@ def _model_config(train_cfg: dict) -> dict:
         "in_channels": int(model_cfg.get("in_channels", 9)),
         "channels": model_cfg.get("channels", [32, 64, 128, 192]),
         "blocks": model_cfg.get("blocks", [2, 2, 4, 6]),
+        "correction_limits": model_cfg.get("correction_limits"),
         "heads": ["local_gain", "local_gamma", "local_bias", "local_color_mix", "local_detail", "local_confidence"],
         "outer_width": int(dataset_cfg.get("outer_width", 128)),
         "boundary_band_px": int(dataset_cfg.get("boundary_band_px", 24)),
