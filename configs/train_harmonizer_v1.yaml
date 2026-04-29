@@ -29,13 +29,13 @@ loss:
     chroma: 0.7
     stats: 0.35
     lab: 0.8
-    gate: 0.008
-    field: 0.04
-    detail: 0.025
-    matrix: 0.03
+    gate: 0.02
+    field: 0.08
+    detail: 0.05
+    matrix: 0.06
     profile: 0.55
-    conf_align: 0.10
-    overcorr: 0.08
+    conf_align: 0.18
+    overcorr: 0.12
 train:
   seed: 42
   lr: 2.0e-4

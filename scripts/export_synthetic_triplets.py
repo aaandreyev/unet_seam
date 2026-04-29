@@ -133,14 +133,14 @@ def main() -> None:
         meta = {
             **sample["meta"],
             "index": idx,
-            "input_path": str(input_path),
-            "target_path": str(target_path),
-            "mask_path": str(mask_path),
+            "input_path": str(input_path.relative_to(out_dir)),
+            "target_path": str(target_path.relative_to(out_dir)),
+            "mask_path": str(mask_path.relative_to(out_dir)),
         }
         if args.save_model_input:
             model_input_path = model_input_dir / f"{stem}.npy"
             np.save(model_input_path, sample["input"].numpy())
-            meta["model_input_path"] = str(model_input_path)
+            meta["model_input_path"] = str(model_input_path.relative_to(out_dir))
         meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         rows.append(meta)
 

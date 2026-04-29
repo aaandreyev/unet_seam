@@ -58,11 +58,5 @@ def _validate_sidecar(sidecar: dict) -> None:
         raise RuntimeError("Unsupported schema_version")
     if sidecar["architecture"]["in_channels"] != 9:
         raise RuntimeError("Model must have 9 input channels")
-    if sidecar["strip"]["canonical_shape_chw"] != [9, 1024, 256]:
-        raise RuntimeError("Canonical strip mismatch")
-    if sidecar["strip"]["outer_width"] != 128:
-        raise RuntimeError("outer_width must be 128")
     if sidecar["architecture"]["name"] != "seam_harmonizer_v3":
         raise RuntimeError("Only seam_harmonizer_v3 exports are supported")
-    if not sidecar["inference"]["hard_copy_outer"]:
-        raise RuntimeError("hard_copy_outer must be true")

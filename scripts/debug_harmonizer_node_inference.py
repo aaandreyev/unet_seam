@@ -43,7 +43,6 @@ def main() -> None:
     ap.add_argument("--inner-width", type=int, default=128)
     ap.add_argument("--strength", type=float, default=1.0)
     ap.add_argument("--output-dir", type=Path, required=True)
-    ap.add_argument("--no-structural-gate", action="store_true")
     args = ap.parse_args()
 
     image = _load_rgb(args.image)
@@ -71,7 +70,6 @@ def main() -> None:
         sides,
         args.inner_width,
         strength=args.strength,
-        structural_gate=not args.no_structural_gate,
     )
     out_dir = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -79,22 +77,12 @@ def main() -> None:
     _save_tensor(corrected[0], out_dir / "corrected.png")
     _save_gray(mask[0], out_dir / "mask.png")
     _save_tensor((debug["merged_delta"][0] + 0.5).clamp(0.0, 1.0), out_dir / "merged_delta.png")
-    if "profile_guard" in debug:
-        _save_gray(debug["profile_guard"][0], out_dir / "profile_guard.png")
     for side, delta in debug.get("side_deltas", {}).items():
         _save_tensor((delta[0] + 0.5).clamp(0.0, 1.0), out_dir / f"side_{side}_delta.png")
-    for side, guard in debug.get("side_profile_guards", {}).items():
-        _save_gray(guard[0], out_dir / f"profile_guard_{side}.png")
     for side, weight in debug.get("weights", {}).items():
         _save_gray(weight[0], out_dir / f"weight_{side}.png")
     for side, confidence in debug.get("side_confidences", {}).items():
         _save_gray(confidence[0], out_dir / f"confidence_{side}.png")
-    for side, safety in debug.get("side_safety_gates", {}).items():
-        _save_gray(safety[0], out_dir / f"safety_{side}.png")
-    for side, err in debug.get("side_before_error", {}).items():
-        _save_gray(err[0], out_dir / f"before_error_{side}.png")
-    for side, err in debug.get("side_after_error", {}).items():
-        _save_gray(err[0], out_dir / f"after_error_{side}.png")
     summary = {
         "image": str(args.image),
         "mask": str(args.mask),

@@ -11,7 +11,7 @@ def main() -> None:
     mask = torch.zeros(1, 1024, 1024)
     mask[:, 256:768, 256:768] = 1.0
     try:
-        node.run(image, mask, "outputs/exports/seam_harmonizer_v3.safetensors", 128, 1.0, 0.03, True, True, True, True, False)
+        node.run(image, mask, "outputs/exports/seam_harmonizer_v3.safetensors", 128, 1.0, True, True, True, True, False)
     except FileNotFoundError:
         print("export not found; smoke test skipped")
 

@@ -59,7 +59,13 @@ class MaterializedStripDataset(Dataset):
 
     def _resolve(self, path: str) -> Path:
         p = Path(path)
-        return p if p.is_absolute() else (self.root / p).resolve()
+        if p.is_absolute():
+            return p
+        for base in (self.root, *self.root.parents):
+            candidate = (base / p).resolve()
+            if candidate.exists():
+                return candidate
+        return (self.root / p).resolve()
 
     def _load_arrays(self, row: dict) -> dict[str, np.ndarray]:
         if "shard_path" in row:

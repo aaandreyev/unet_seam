@@ -46,6 +46,38 @@ def test_materialized_dataset_loads_triplets(tmp_path: Path) -> None:
     assert sample["mask"].shape == (1, 1024, 256)
 
 
+def test_materialized_dataset_loads_repo_relative_triplets(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    root = repo_root / "outputs" / "synthetic_triplets_100"
+    for sub in ("inputs", "targets", "masks"):
+        (root / sub).mkdir(parents=True)
+    input_arr = np.full((1024, 256, 3), 64, dtype="uint8")
+    target_arr = np.full((1024, 256, 3), 128, dtype="uint8")
+    mask_arr = np.zeros((1024, 256), dtype="uint8")
+    mask_arr[:, 128:] = 255
+    Image.fromarray(input_arr).save(root / "inputs/00000000.png")
+    Image.fromarray(target_arr).save(root / "targets/00000000.png")
+    Image.fromarray(mask_arr).save(root / "masks/00000000.png")
+    write_jsonl(
+        root / "manifest.jsonl",
+        [
+            {
+                "input_path": "outputs/synthetic_triplets_100/inputs/00000000.png",
+                "target_path": "outputs/synthetic_triplets_100/targets/00000000.png",
+                "mask_path": "outputs/synthetic_triplets_100/masks/00000000.png",
+                "split": "train",
+                "seam_x": 128,
+                "outer_width": 128,
+            }
+        ],
+    )
+    ds = MaterializedStripDataset(root / "manifest.jsonl", split="train", preload=False)
+    sample = ds[0]
+    assert sample["input"].shape == (9, 1024, 256)
+    assert sample["target"].shape == (3, 1024, 256)
+    assert sample["mask"].shape == (1, 1024, 256)
+
+
 def test_materialized_dataset_loads_sharded_triplets(tmp_path: Path) -> None:
     root = tmp_path / "mat"
     (root / "shards").mkdir(parents=True)

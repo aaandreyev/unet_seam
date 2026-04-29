@@ -9,7 +9,7 @@ from src.data.corruptions import GROUPS, _apply_corruption_op, _build_artifact_f
 from src.data.harmonizer_input import build_harmonizer_input
 from src.data.manifest import write_jsonl
 from src.data.synthetic_strip_dataset import SyntheticStripDataset
-from src.infer.correct_full_frame import _structural_strength_scale
+from src.infer.correct_full_frame import apply_corrector_to_full_frame
 from src.losses.harmonizer_losses import HarmonizerLossComputer
 from src.models.harmonizer import SeamHarmonizerV3
 from src.models.harmonizer_blocks import NAFBlockLite
@@ -107,18 +107,41 @@ def test_spec_synthetic_dataset_builds_v3_input(tmp_path: Path):
 
 
 def test_spec_comfy_node_uses_v3_name():
-    assert set(NODE_CLASS_MAPPINGS) == {"SeamHarmonizerV3"}
+    assert set(NODE_CLASS_MAPPINGS) == {"SeamHarmonizerV3", "SeamHarmonizerHybrid"}
     assert NODE_DISPLAY_NAME_MAPPINGS["SeamHarmonizerV3"] == "Seam Harmonizer v3"
+    assert NODE_DISPLAY_NAME_MAPPINGS["SeamHarmonizerHybrid"] == "Seam Harmonizer Hybrid"
 
 
-def test_spec_inference_structural_gate_thresholds():
-    matching = torch.zeros(3, 64, 256)
-    band = torch.rand(3, 64, 8)
-    matching[:, :, 120:128] = torch.flip(band, dims=(-1,))
-    matching[:, :, 128:136] = band
-    scale, score = _structural_strength_scale(matching, outer_width=128, band_px=8)
-    assert scale == 1.0
-    assert score > 0.5
+def test_spec_inference_uses_raw_model_outputs_without_post_gates():
+    class ConstantShift(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(()))
+
+        def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+            corrected = x[:, :3].clone()
+            corrected_inner = corrected[..., 128:] + 0.125
+            corrected[..., 128:] = corrected_inner
+            b = x.shape[0]
+            return {
+                "corrected_strip": corrected,
+                "corrected_inner": corrected_inner,
+                "gain_lowres": torch.zeros(b, 1, 256, 32, device=x.device),
+                "gamma_lowres": torch.zeros(b, 1, 256, 32, device=x.device),
+                "bias_lowres": torch.zeros(b, 3, 256, 32, device=x.device),
+                "mix_lowres": torch.zeros(b, 3, 3, 256, 32, device=x.device),
+                "detail_lowres": torch.zeros(b, 3, 256, 32, device=x.device),
+                "gate_lowres": torch.zeros(b, 1, 256, 32, device=x.device),
+                "confidence": torch.ones(b, 1, x.shape[-2], 128, device=x.device),
+                "gain": torch.ones(b, 1, x.shape[-2], 128, device=x.device),
+                "detail": torch.zeros(b, 3, x.shape[-2], 128, device=x.device),
+            }
+
+    image = torch.zeros(1, 3, 256, 256)
+    mask = torch.zeros(1, 1, 256, 256)
+    mask[:, :, 64:192, 64:192] = 1.0
+    out, _debug = apply_corrector_to_full_frame(ConstantShift(), image, mask, (64, 64, 192, 192), ["left"], 128, strength=1.0)
+    assert torch.allclose(out[:, :, 64:192, 64:192], torch.full_like(out[:, :, 64:192, 64:192], 0.125), atol=1e-6)
 
 
 def test_spec_export_rejects_incompatible_checkpoint():

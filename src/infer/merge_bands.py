@@ -98,16 +98,17 @@ def merge_side_deltas(
     mask: torch.Tensor,
     *,
     side_confidences: dict[str, torch.Tensor] | None = None,
-    min_confidence_weight: float = 0.2,
     bbox: tuple[int, int, int, int] | None = None,
     inner_width: int | None = None,
-    corner_disagreement_threshold: float = 0.03,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     if not side_deltas:
         zeros = torch.zeros(mask.shape[0], 3, mask.shape[-2], mask.shape[-1], device=mask.device, dtype=mask.dtype)
         return zeros, {}
     if len(side_deltas) == 1:
         side, delta = next(iter(side_deltas.items()))
+        if side_confidences and side in side_confidences:
+            confidence = side_confidences[side].to(device=mask.device, dtype=mask.dtype)
+            return delta * confidence * mask, {side: confidence * mask}
         return delta * mask, {side: torch.ones_like(mask)}
 
     use_seam = bbox is not None and inner_width is not None and inner_width > 0
@@ -121,7 +122,6 @@ def merge_side_deltas(
             bmap = build_side_weight_map(mask, side) * support
         if side_confidences and side in side_confidences:
             confidence = side_confidences[side].to(device=mask.device, dtype=mask.dtype)
-            confidence = min_confidence_weight + (1.0 - min_confidence_weight) * confidence.clamp(0.0, 1.0)
             bmap = bmap * confidence
         weights[side] = bmap
 
@@ -130,20 +130,4 @@ def merge_side_deltas(
     d_stack = torch.stack([side_deltas[s] for s in sides_order], dim=0)
     total_w = w_stack.sum(dim=0) + 1e-8
     merged0 = (w_stack * d_stack).sum(dim=0) / total_w
-
-    if not use_seam or corner_disagreement_threshold <= 0.0 or len(sides_order) < 2:
-        return merged0 * mask, weights
-
-    diff = (d_stack - merged0.unsqueeze(0)).abs()
-    disag = (w_stack * diff).sum(dim=0) / total_w
-    disag = disag.mean(dim=1, keepdim=True).clamp(0.0, 1.0)
-
-    win_idx = w_stack.argmax(dim=0)  # (B, 1, H, W)
-    b, _, h, w_ = d_stack.shape[1], d_stack.shape[2], d_stack.shape[3], d_stack.shape[4]
-    gather_idx = win_idx.unsqueeze(0).expand(1, b, 3, h, w_).long()
-    d_win = d_stack.gather(0, gather_idx).squeeze(0)
-
-    T = float(corner_disagreement_threshold)
-    alpha = (T - disag).clamp(0.0, 1.0) / T
-    merged = alpha * merged0 + (1.0 - alpha) * d_win
-    return merged * mask, weights
+    return merged0 * mask, weights

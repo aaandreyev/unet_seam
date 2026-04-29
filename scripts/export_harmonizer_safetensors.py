@@ -104,12 +104,10 @@ def main() -> None:
         },
         "orientation": {"canonical": "vertical_outer_left", "train_rotation_aug": True},
         "inference": {
-            "strength_range": [0.0, 10.0],
             "strength_default": float(cfg.get("strength_default", 1.0)),
-            "hard_copy_outer": True,
-            "inner_taper": "cosine_from_seam_to_inner_edge",
-            "corner_fusion": "weighted_average",
-            "clamp_output": [0.0, 1.0],
+            "mask_policy": "preserve_original_outside_mask",
+            "merge_strategy": "seam_local_weighted_blend",
+            "uses_model_confidence_weights": True,
         },
         "training": {
             "dataset": "synthetic_pretrain_v3",

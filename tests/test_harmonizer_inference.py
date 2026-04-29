@@ -1,23 +1,18 @@
 import torch
 
-from src.infer.correct_full_frame import (
-    _build_profile_guard,
-    _build_safety_gate,
-    _canonical_model_input,
-    _inner_taper,
-    apply_corrector_to_full_frame,
-)
+from src.infer.correct_full_frame import _canonical_model_input, apply_corrector_to_full_frame
 
 
 class AddInnerModel(torch.nn.Module):
-    def __init__(self, delta: float = 0.1) -> None:
+    def __init__(self, delta: float = 0.1, confidence: float = 1.0) -> None:
         super().__init__()
         self.weight = torch.nn.Parameter(torch.zeros(()))
         self.delta = delta
+        self.confidence = confidence
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         corrected = x[:, :3].clone()
-        corrected_inner = (corrected[..., 128:] + self.delta).clamp(0.0, 1.0)
+        corrected_inner = corrected[..., 128:] + self.delta
         corrected[..., 128:] = corrected_inner
         b = x.shape[0]
         return {
@@ -29,7 +24,7 @@ class AddInnerModel(torch.nn.Module):
             "mix_lowres": torch.zeros(b, 3, 3, 256, 32, device=x.device),
             "detail_lowres": torch.zeros(b, 3, 256, 32, device=x.device),
             "gate_lowres": torch.zeros(b, 1, 256, 32, device=x.device),
-            "confidence": torch.zeros(b, 1, x.shape[-2], 128, device=x.device),
+            "confidence": torch.full((b, 1, x.shape[-2], 128), self.confidence, device=x.device),
             "gain": torch.ones(b, 1, x.shape[-2], 128, device=x.device),
             "detail": torch.zeros(b, 3, x.shape[-2], 128, device=x.device),
         }
@@ -45,13 +40,6 @@ def test_canonical_model_input_channels():
     assert torch.allclose(model_in[:, 4, :, -1], torch.ones_like(model_in[:, 4, :, -1]))
 
 
-def test_inner_taper_is_strongest_at_seam_and_zero_at_inner_edge():
-    taper = _inner_taper(8, 128, torch.device("cpu"), torch.float32)
-    assert torch.allclose(taper[..., 0], torch.ones_like(taper[..., 0]))
-    assert torch.allclose(taper[..., -1], torch.full_like(taper[..., -1], 0.15), atol=1e-6)
-    assert torch.all(taper[..., 1:] <= taper[..., :-1] + 1e-6)
-
-
 def test_harmonizer_full_frame_keeps_outside_mask_exact():
     image = torch.rand(1, 3, 1024, 1024)
     mask = torch.zeros(1, 1, 1024, 1024)
@@ -63,58 +51,30 @@ def test_harmonizer_full_frame_keeps_outside_mask_exact():
     assert torch.equal(out * (1.0 - mask), image * (1.0 - mask))
 
 
-def test_harmonizer_accepts_strength_above_one():
-    image = torch.rand(1, 3, 512, 512)
+def test_harmonizer_applies_raw_delta_without_post_gating():
+    image = torch.zeros(1, 3, 512, 512)
     mask = torch.zeros(1, 1, 512, 512)
     mask[:, :, 128:384, 128:384] = 1.0
     bbox = (128, 128, 384, 384)
-    out, _ = apply_corrector_to_full_frame(AddInnerModel(), image, mask, bbox, ["left", "right"], 128, strength=5.0)
+    out, _ = apply_corrector_to_full_frame(AddInnerModel(delta=0.1, confidence=1.0), image, mask, bbox, ["left"], 128, strength=1.0)
+    changed = out[:, :, 128:384, 128:256]
+    assert torch.allclose(changed, torch.full_like(changed, 0.1), atol=1e-6)
+
+
+def test_harmonizer_accepts_unbounded_strength_values():
+    image = torch.zeros(1, 3, 512, 512)
+    mask = torch.zeros(1, 1, 512, 512)
+    mask[:, :, 128:384, 128:384] = 1.0
+    bbox = (128, 128, 384, 384)
+    out, _ = apply_corrector_to_full_frame(AddInnerModel(delta=0.1, confidence=1.0), image, mask, bbox, ["left"], 128, strength=12.0)
     assert out.shape == image.shape
+    assert float(out[:, :, 128:384, 128:256].mean()) > 1.0
 
 
-def test_safety_gate_suppresses_worsening_rows():
-    strip = torch.full((1, 3, 8, 256), 0.5)
-    strip[..., 128:152] = 0.5
-    corrected = strip.clone()
-    corrected[..., 128:152] = 0.9
-    safety, before_err, after_err = _build_safety_gate(strip, corrected, outer_width=128, inner_width=128, band_px=24)
-    assert float(before_err.mean()) < float(after_err.mean())
-    assert float(safety[..., :24].mean()) < 0.5
-
-
-def test_safety_gate_stays_open_when_correction_improves():
-    strip = torch.full((1, 3, 8, 256), 0.5)
-    strip[..., 128:152] = 0.8
-    corrected = strip.clone()
-    corrected[..., 128:152] = 0.55
-    safety, before_err, after_err = _build_safety_gate(strip, corrected, outer_width=128, inner_width=128, band_px=24)
-    assert float(after_err.mean()) < float(before_err.mean())
-    assert float(safety[..., :24].mean()) > 0.9
-
-
-def test_profile_guard_suppresses_long_smooth_stripe():
-    merged = torch.zeros(1, 3, 128, 128)
-    mask = torch.zeros(1, 1, 128, 128)
-    mask[:, :, 16:112, 16:112] = 1.0
-    bbox = (16, 16, 112, 112)
-    # Fill the whole inner so all four side samplers see the same flat profile (no false 1.0
-    # from empty opposing bands when full_guard averages per-side patches).
-    merged[:, :, 16:112, 16:112] = 0.06
-    guard, side_guards, stats = _build_profile_guard(merged, mask, bbox, band_px=12)
-    # Row along the middle of the inner: guard should stay low for a flat stripe across the
-    # full inner width (not rebound to ~1 just past band_px when the patch ended at 24px).
-    row = guard[0, 0, 64, 16:112]
-    assert float(row[8]) > float(row[72]), "seam column should stay more open than deep band"
-    assert float(max(row[18:24]) - min(row[24:32])) < 0.12, "no spike across old band_px edge"
-    assert float(side_guards["left"][0, 0, 64, 16 + 72]) < 0.82
-    assert stats["left"]["profile_signal_mean"] > 0.02
-
-
-def test_profile_guard_preserves_localized_patch():
-    merged = torch.zeros(1, 3, 128, 128)
-    mask = torch.zeros(1, 1, 128, 128)
-    mask[:, :, 16:112, 16:112] = 1.0
-    bbox = (16, 16, 112, 112)
-    merged[:, :, 48:56, 16:28] = 0.06
-    guard, _, _ = _build_profile_guard(merged, mask, bbox, band_px=12)
-    assert float(guard[:, :, 48:56, 16:28].mean()) > 0.88
+def test_zero_confidence_suppresses_side_contribution():
+    image = torch.zeros(1, 3, 512, 512)
+    mask = torch.zeros(1, 1, 512, 512)
+    mask[:, :, 128:384, 128:384] = 1.0
+    bbox = (128, 128, 384, 384)
+    out, _ = apply_corrector_to_full_frame(AddInnerModel(delta=0.1, confidence=0.0), image, mask, bbox, ["left"], 128, strength=1.0)
+    assert torch.allclose(out, image)

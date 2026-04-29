@@ -84,6 +84,9 @@ def test_export_synthetic_triplets_matches_dataset(tmp_path: Path) -> None:
 
     rows = read_jsonl(out_dir / "manifest.jsonl")
     assert len(rows) == 2
+    assert rows[0]["input_path"] == "inputs/000000.png"
+    assert rows[0]["target_path"] == "targets/000000.png"
+    assert rows[0]["mask_path"] == "masks/000000.png"
 
     sample0 = dataset[0]
     input0 = np.asarray(Image.open(out_dir / "inputs/000000.png"))

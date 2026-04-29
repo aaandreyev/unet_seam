@@ -43,6 +43,21 @@ def test_confidence_weighting_prefers_higher_confidence_side():
     assert float(merged[..., 0, 0].mean()) > 0.15
 
 
+def test_zero_confidence_removes_side_weight_entirely():
+    mask = torch.ones(1, 1, 8, 8)
+    side_deltas = {
+        "left": torch.full((1, 3, 8, 8), 0.2),
+        "top": torch.full((1, 3, 8, 8), 0.1),
+    }
+    side_confidences = {
+        "left": torch.zeros(1, 1, 8, 8),
+        "top": torch.ones(1, 1, 8, 8),
+    }
+    merged, weights = merge_side_deltas(side_deltas, mask, side_confidences=side_confidences)
+    assert float(weights["left"].max()) == 0.0
+    assert float(merged[..., 0, 0].mean()) < 0.12
+
+
 def test_seam_local_left_weight_stronger_near_bbox_left_seam():
     """Weights must follow the mask seam (bbox), not the image border.
     Check is done at the midpoint row (y=35) which is well away from corners."""
@@ -55,14 +70,12 @@ def test_seam_local_left_weight_stronger_near_bbox_left_seam():
     assert float(wl[0, 0, 35, 20]) > float(wl[0, 0, 35, 27])  # seam at x=20, decay into interior
 
 
-def test_merge_seam_resolves_strong_corner_disagreement_with_winner():
-    """Large disagreement at the seam midpoint (away from corners) must pick the winner side."""
+def test_merge_seam_blends_corner_disagreement_without_amplification():
+    """Without arbitration heuristics, merge stays a bounded weighted blend."""
     h, w = 64, 64
-    # Use a bbox large enough that the midpoint row is well clear of corners
     bbox = (10, 10, 54, 54)
     mask = _bbox_mask(h, w, *bbox)
     iw = 8
-    # Only left band has a delta; left wins at the seam-midpoint pixel (y=32, x=10)
     left_delta = torch.zeros(1, 3, h, w)
     left_delta[:, :, 10:54, 10:18] = 0.2
     top_delta = torch.zeros(1, 3, h, w)
@@ -72,11 +85,8 @@ def test_merge_seam_resolves_strong_corner_disagreement_with_winner():
         mask,
         bbox=bbox,
         inner_width=iw,
-        corner_disagreement_threshold=0.05,
     )
-    # At seam midpoint (y=32, x=10): top weight is 0 (far from top seam), left has all the weight
-    # → merged must be close to left_delta = +0.2
-    assert float(merged[0, 0, 32, 10].abs()) > 0.15
+    assert float(merged.abs().max()) <= 0.2 + 1e-6
 
 
 # ── Corner tapering tests ─────────────────────────────────────────────────────
@@ -173,7 +183,6 @@ def test_corner_tapering_kills_blowup_at_high_strength():
         mask,
         bbox=bbox,
         inner_width=iw,
-        corner_disagreement_threshold=0.03,
     )
 
     # Actual corner pixel — both weights are 0 → merged must be ~0
