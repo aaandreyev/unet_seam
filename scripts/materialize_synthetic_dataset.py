@@ -22,18 +22,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.data.manifest import read_jsonl, write_jsonl
+from src.data.corruptions import apply_random_corruptions
+from src.data.harmonizer_input import build_harmonizer_input
 from src.data.strip_geometry import StripSpec
 from src.data.synthetic_strip_dataset import SyntheticStripDataset
 
 
-def _save_rgb(path: Path, tensor: torch.Tensor) -> None:
-    arr = (tensor.permute(1, 2, 0).numpy().clip(0.0, 1.0) * 255.0).astype("uint8")
-    Image.fromarray(arr).save(path)
+def _tensor_to_rgb_uint8(tensor: torch.Tensor) -> np.ndarray:
+    return (tensor.permute(1, 2, 0).numpy().clip(0.0, 1.0) * 255.0).astype("uint8")
 
 
-def _save_mask(path: Path, tensor: torch.Tensor) -> None:
-    arr = (tensor.numpy().clip(0.0, 1.0) * 255.0).astype("uint8")
-    Image.fromarray(arr).save(path)
+def _tensor_to_mask_uint8(tensor: torch.Tensor) -> np.ndarray:
+    return (tensor.numpy().clip(0.0, 1.0) * 255.0).astype("uint8")
 
 
 def _should_use_tqdm() -> bool:
@@ -90,36 +90,94 @@ def _worker_init(config_path: str, manifest_path: str, export_root: str) -> None
     _EXPORT_ROOT = export_root
 
 
-def _export_sample(sample_idx: int) -> dict:
+def _materialize_sample(dataset: SyntheticStripDataset, row_idx: int, sample_idx: int, base_image: torch.Tensor) -> dict[str, object]:
+    row = dataset.rows[row_idx]
+    cfg = dataset._config_for_index(sample_idx)
+    image = dataset._augment_source_image(base_image, cfg)
+    clean_strip = dataset._extract_clean_strip(image, cfg)
+    if clean_strip.shape[-2:] != (dataset.spec.strip_height, dataset.spec.outer_width + cfg.inner_width):
+        raise RuntimeError("unexpected strip shape")
+    seam_x = dataset.spec.outer_width + cfg.seam_jitter_px
+    pad_left = max(0, -cfg.seam_jitter_px)
+    pad_right = max(0, cfg.seam_jitter_px)
+    clean_strip = torch.nn.functional.pad(clean_strip, (pad_left, pad_right, 0, 0), mode="replicate")
+    clean_strip = clean_strip[..., : dataset.spec.strip_height, : dataset.spec.outer_width + cfg.inner_width]
+    target = clean_strip.clone()
+    input_rgb = clean_strip.unsqueeze(0)
+    corrupted_ops: list[dict[str, object]] = []
+    if dataset.apply_corruption:
+        inner = input_rgb[..., dataset.spec.outer_width :]
+        corrupted = apply_random_corruptions(inner, torch.Generator().manual_seed(dataset.seed + sample_idx))
+        input_rgb[..., dataset.spec.outer_width :] = corrupted.image
+        corrupted_ops = corrupted.ops
+    built = build_harmonizer_input(
+        input_rgb.squeeze(0),
+        outer_width=dataset.spec.outer_width,
+        boundary_band_px=dataset.boundary_band_px,
+        seam_x=seam_x,
+    )
+    return {
+        "input": _tensor_to_rgb_uint8(input_rgb.squeeze(0)),
+        "target": _tensor_to_rgb_uint8(target),
+        "mask": _tensor_to_mask_uint8(built["mask"][0]),
+        "meta": {
+            "image_id": row["id"],
+            "axis": cfg.axis,
+            "side": cfg.side,
+            "rotation_k": cfg.rotation_k,
+            "flip_h": cfg.flip_h,
+            "seam_jitter_px": cfg.seam_jitter_px,
+            "inner_width": cfg.inner_width,
+            "edge_padded_pixels": 0,
+            "ops": corrupted_ops,
+            "scene_tags": row.get("scene_tags", []),
+            "split": row.get("split"),
+            "cluster_id": row.get("cluster_id"),
+            "seam_x_frac_in_source": cfg.seam_x_frac,
+            "seam_x": seam_x,
+        },
+    }
+
+
+def _export_row_shard(row_idx: int) -> list[dict]:
     global _DATASET
     dataset: SyntheticStripDataset = _DATASET
     base_out = Path(_EXPORT_ROOT)
-    sample = dataset[sample_idx]
-    stem = f"{sample_idx:08d}"
-    input_rel = Path("inputs") / f"{stem}.png"
-    target_rel = Path("targets") / f"{stem}.png"
-    mask_rel = Path("masks") / f"{stem}.png"
-    meta_rel = Path("meta") / f"{stem}.json"
-    _save_rgb(base_out / input_rel, sample["input_rgb"])
-    _save_rgb(base_out / target_rel, sample["target"])
-    _save_mask(base_out / mask_rel, sample["mask"][0])
-    row = {
-        **sample["meta"],
-        "sample_index": sample_idx,
-        "input_path": str(input_rel),
-        "target_path": str(target_rel),
-        "mask_path": str(mask_rel),
-        "outer_width": int(dataset.spec.outer_width),
-        "strip_height": int(dataset.spec.strip_height),
-        "boundary_band_px": int(dataset.boundary_band_px),
-    }
-    (base_out / meta_rel).write_text(json.dumps(row, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return row
-
-
-def _export_chunk(chunk: tuple[int, int]) -> list[dict]:
-    start_idx, end_idx = chunk
-    return [_export_sample(sample_idx) for sample_idx in range(start_idx, end_idx)]
+    row = dataset.rows[row_idx]
+    source_image = dataset._load_image(row)
+    shard_dir = base_out / "shards"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    shard_rel = Path("shards") / f"{row_idx:06d}.npz"
+    shard_path = base_out / shard_rel
+    inputs: list[np.ndarray] = []
+    targets: list[np.ndarray] = []
+    masks: list[np.ndarray] = []
+    rows: list[dict] = []
+    base_idx = row_idx * dataset.strips_per_image
+    for local_idx in range(dataset.strips_per_image):
+        sample_idx = base_idx + local_idx
+        materialized = _materialize_sample(dataset, row_idx, sample_idx, source_image)
+        inputs.append(materialized["input"])
+        targets.append(materialized["target"])
+        masks.append(materialized["mask"])
+        rows.append(
+            {
+                **materialized["meta"],
+                "sample_index": sample_idx,
+                "shard_path": str(shard_rel),
+                "shard_index": local_idx,
+                "outer_width": int(dataset.spec.outer_width),
+                "strip_height": int(dataset.spec.strip_height),
+                "boundary_band_px": int(dataset.boundary_band_px),
+            }
+        )
+    np.savez(
+        shard_path,
+        inputs=np.stack(inputs, axis=0),
+        targets=np.stack(targets, axis=0),
+        masks=np.stack(masks, axis=0),
+    )
+    return rows
 
 
 def main() -> None:
@@ -128,7 +186,6 @@ def main() -> None:
     parser.add_argument("--manifest", default="manifests/input_raw_manifest.jsonl")
     parser.add_argument("--out", required=True)
     parser.add_argument("--workers", type=int, default=max(1, os.cpu_count() or 4))
-    parser.add_argument("--samples-per-task", type=int, default=4)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -139,19 +196,14 @@ def main() -> None:
         if not args.overwrite:
             raise FileExistsError(f"{out_dir} already exists; pass --overwrite to recreate")
         shutil.rmtree(out_dir)
-    for sub in ("inputs", "targets", "masks", "meta"):
-        (out_dir / sub).mkdir(parents=True, exist_ok=True)
+    (out_dir / "shards").mkdir(parents=True, exist_ok=True)
 
     rows = read_jsonl(manifest_path)
     if not rows:
         raise ValueError(f"empty manifest: {manifest_path}")
     strips_per_image = int(yaml.safe_load(config_path.read_text(encoding="utf-8"))["dataset"].get("strips_per_image", 25))
     total_samples = len(rows) * strips_per_image
-    if total_samples <= 0:
-        raise ValueError("materialization requires at least one sample")
-    worker_count = max(1, min(args.workers, total_samples))
-    samples_per_task = max(1, args.samples_per_task)
-    tasks = [(start_idx, min(start_idx + samples_per_task, total_samples)) for start_idx in range(0, total_samples, samples_per_task)]
+    worker_count = max(1, min(args.workers, len(rows)))
 
     global _EXPORT_ROOT
     _EXPORT_ROOT = str(out_dir)
@@ -164,7 +216,7 @@ def main() -> None:
         initializer=_worker_init,
         initargs=(str(config_path), str(manifest_path), str(out_dir)),
     ) as executor:
-        futures = [executor.submit(_export_chunk, task) for task in tasks]
+        futures = [executor.submit(_export_row_shard, row_idx) for row_idx in range(len(rows))]
         progress = None
         if use_tqdm:
             progress = tqdm(
@@ -225,6 +277,7 @@ def main() -> None:
         "out_dir": str(out_dir),
         "source_images": len(rows),
         "samples": len(all_rows),
+        "shards": len(rows),
         "splits": split_counts,
         "workers": worker_count,
         "seconds": round(elapsed, 2),

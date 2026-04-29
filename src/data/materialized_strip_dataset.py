@@ -50,6 +50,7 @@ class MaterializedStripDataset(Dataset):
         self.rows = [row for row in read_jsonl(self.manifest_path) if not split or row.get("split") == split]
         self.preload = preload
         self._cache: list[dict[str, np.ndarray]] | None = None
+        self._shard_cache: dict[str, dict[str, np.ndarray]] = {}
         if self.preload:
             self._cache = [self._load_arrays(row) for row in self.rows]
 
@@ -61,11 +62,33 @@ class MaterializedStripDataset(Dataset):
         return p if p.is_absolute() else (self.root / p).resolve()
 
     def _load_arrays(self, row: dict) -> dict[str, np.ndarray]:
+        if "shard_path" in row:
+            shard = self._load_shard(row["shard_path"])
+            shard_index = int(row["shard_index"])
+            return {
+                "input": shard["inputs"][shard_index],
+                "target": shard["targets"][shard_index],
+                "mask": shard["masks"][shard_index],
+            }
         return {
             "input": _load_rgb_uint8(self._resolve(row["input_path"])),
             "target": _load_rgb_uint8(self._resolve(row["target_path"])),
             "mask": _load_mask_uint8(self._resolve(row["mask_path"])),
         }
+
+    def _load_shard(self, path: str) -> dict[str, np.ndarray]:
+        cache_key = path
+        cached = self._shard_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        with np.load(self._resolve(path), allow_pickle=False) as data:
+            loaded = {
+                "inputs": data["inputs"],
+                "targets": data["targets"],
+                "masks": data["masks"],
+            }
+        self._shard_cache[cache_key] = loaded
+        return loaded
 
     def _to_tensor(self, arr: np.ndarray) -> torch.Tensor:
         if arr.ndim == 3:
