@@ -106,6 +106,7 @@ class TestModelOutputShapes:
             "mix_lowres",
             "detail_lowres",
             "gate_lowres",
+            "attention_lowres",
             "corrected_inner",
             "corrected_strip",
             "confidence",

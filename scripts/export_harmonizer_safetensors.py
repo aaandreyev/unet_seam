@@ -37,7 +37,7 @@ def _model_config(train_cfg: dict) -> dict:
     }
 
 
-def _validate_checkpoint_for_export(ckpt: dict) -> None:
+def _validate_checkpoint_for_export(ckpt: dict) -> torch.nn.Module:
     train_cfg = ckpt.get("config") or {}
     arch = ((train_cfg.get("model") or {}).get("architecture")) or ((train_cfg.get("model") or {}).get("name"))
     if arch != "seam_harmonizer_v3":
@@ -52,12 +52,35 @@ def _validate_checkpoint_for_export(ckpt: dict) -> None:
         }
     )
     try:
-        model.load_state_dict(ckpt["ema"])
+        result = model.load_state_dict(ckpt["ema"], strict=False)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
             "Checkpoint EMA weights are incompatible with the current export architecture. "
             "Train a fresh v3 checkpoint or use --load-weights followed by new training before export."
         ) from exc
+    # Tolerate legacy ckpts missing attention_head (it zero-inits and does not affect
+    # reconstruction). Reject anything else missing — it would mean essential weights
+    # are absent and the export would silently ship a half-initialised model.
+    tolerated_prefixes = ("attention_head",)
+    real_missing = [k for k in result.missing_keys if not k.startswith(tolerated_prefixes)]
+    if real_missing or result.unexpected_keys:
+        raise RuntimeError(
+            "Checkpoint EMA weights are incompatible with the current export architecture. "
+            f"missing={real_missing[:8]} unexpected={list(result.unexpected_keys)[:8]}"
+        )
+    if result.missing_keys:
+        print(
+            json.dumps(
+                {
+                    "event": "load_state_dict_partial",
+                    "missing": list(result.missing_keys)[:8],
+                    "tolerated": True,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+    return model
 
 
 def main() -> None:
@@ -66,14 +89,17 @@ def main() -> None:
     args = parser.parse_args()
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
     ckpt = load_checkpoint(Path(cfg["checkpoint"]), map_location="cpu")
-    _validate_checkpoint_for_export(ckpt)
+    model = _validate_checkpoint_for_export(ckpt)
     train_cfg = ckpt.get("config") or {}
     dataset_cfg = train_cfg.get("dataset") or {}
     train_section = train_cfg.get("train") or {}
     export_root = Path(cfg["export_root"])
     export_root.mkdir(parents=True, exist_ok=True)
     model_path = export_root / f"{cfg['model_name']}.safetensors"
-    save_file(_contiguous_state_dict(ckpt["ema"]), str(model_path))
+    # Save from model.state_dict() (not the raw ckpt) so the export always contains
+    # the full current architecture — including zero-init attention_head when the
+    # source ckpt is legacy. Downstream loaders can then use strict=True if desired.
+    save_file(_contiguous_state_dict(model.state_dict()), str(model_path))
     sidecar = {
         "model_name": cfg["model_name"],
         "schema_version": 1,

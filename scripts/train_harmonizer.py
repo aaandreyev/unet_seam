@@ -90,6 +90,45 @@ def _raw_model(module: torch.nn.Module) -> torch.nn.Module:
     return getattr(module, "_orig_mod", module)
 
 
+CORRECTION_PREFIXES: tuple[str, ...] = ("coarse_head", "coarse_adapter")
+ENCODER_PREFIXES: tuple[str, ...] = ("encoder",)
+
+
+def apply_phase_a_freeze(module: torch.nn.Module, freeze: bool) -> None:
+    """Freeze (or unfreeze) the correction heads (gain/gamma/bias/mix/detail/gate).
+    During phase A only attention_head + encoder/decoder/bottleneck train, so the new
+    attention supervision can settle without the correction heads compensating in lockstep."""
+    raw = _raw_model(module)
+    for name, p in raw.named_parameters():
+        if name.startswith(CORRECTION_PREFIXES):
+            p.requires_grad = not freeze
+        else:
+            p.requires_grad = True
+
+
+def build_param_groups(
+    module: torch.nn.Module,
+    *,
+    base_lr: float,
+    encoder_lr_scale: float = 1.0,
+) -> list[dict]:
+    """Two param groups: encoder gets `base_lr * encoder_lr_scale`, everything else `base_lr`.
+    Encoder is already well-trained on prior runs — discriminative LR keeps it gently moving
+    instead of forcing a hard freeze, while letting heads adapt at full speed."""
+    raw = _raw_model(module)
+    encoder_params: list[torch.nn.Parameter] = []
+    other_params: list[torch.nn.Parameter] = []
+    for name, p in raw.named_parameters():
+        if name.startswith(ENCODER_PREFIXES):
+            encoder_params.append(p)
+        else:
+            other_params.append(p)
+    return [
+        {"name": "encoder", "params": encoder_params, "lr": base_lr * float(encoder_lr_scale)},
+        {"name": "other", "params": other_params, "lr": base_lr},
+    ]
+
+
 def _load_matching_state(module: torch.nn.Module, state_dict: dict[str, torch.Tensor]) -> dict[str, int]:
     module = _raw_model(module)
     current = module.state_dict()
@@ -241,9 +280,10 @@ def main() -> None:
         if device.type == "cuda" and not materialized_manifest
         else None
     )
+    encoder_lr_scale = float(train_cfg.get("encoder_lr_scale", 1.0))
+    base_lr = float(train_cfg["lr"])
     optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(train_cfg["lr"]),
+        build_param_groups(model, base_lr=base_lr, encoder_lr_scale=encoder_lr_scale),
         weight_decay=float(train_cfg["weight_decay"]),
         betas=tuple(train_cfg.get("betas", [0.9, 0.99])),
     )
@@ -346,8 +386,21 @@ def main() -> None:
 
         tb_writer = SummaryWriter(str(Path(log_cfg.get("log_dir", "outputs/logs/tensorboard_harmonizer"))))
     global_step = start_epoch * len(train_loader)
+    freeze_correction_epochs = int(train_cfg.get("freeze_correction_epochs", 0))
+    freeze_phase_floor = start_epoch
     for epoch in range(start_epoch, total_epochs):
         outer_width = int(cfg["dataset"].get("outer_width", 128))
+        in_phase_a = (epoch - freeze_phase_floor) < freeze_correction_epochs
+        apply_phase_a_freeze(model, freeze=in_phase_a)
+        if freeze_correction_epochs > 0:
+            print(
+                json.dumps(
+                    {"event": "freeze_phase", "epoch": epoch + 1, "phase": "A" if in_phase_a else "B",
+                     "correction_frozen": in_phase_a},
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
         train_result, global_step = run_harmonizer_epoch(
             model,
             train_loader,

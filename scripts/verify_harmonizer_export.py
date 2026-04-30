@@ -34,11 +34,15 @@ def main() -> None:
     if sidecar["architecture"]["name"] != "seam_harmonizer_v3":
         raise RuntimeError("not a SeamHarmonizerV3 export")
     exported = _build_from_sidecar(sidecar)
-    exported.load_state_dict(load_file(str(model_path), device="cpu"))
+    exported_load = exported.load_state_dict(load_file(str(model_path), device="cpu"), strict=False)
+    if exported_load.missing_keys or exported_load.unexpected_keys:
+        print(json.dumps({"event": "exported_load_partial", "missing": list(exported_load.missing_keys)[:8], "unexpected": list(exported_load.unexpected_keys)[:8]}, ensure_ascii=False), flush=True)
     exported.eval()
     ckpt = load_checkpoint(Path(cfg["checkpoint"]), map_location="cpu")
     raw = _build_from_sidecar(sidecar)
-    raw.load_state_dict(ckpt["ema"])
+    raw_load = raw.load_state_dict(ckpt["ema"], strict=False)
+    if raw_load.missing_keys or raw_load.unexpected_keys:
+        print(json.dumps({"event": "raw_load_partial", "missing": list(raw_load.missing_keys)[:8], "unexpected": list(raw_load.unexpected_keys)[:8]}, ensure_ascii=False), flush=True)
     raw.eval()
     generator = torch.Generator().manual_seed(123)
     x = torch.rand(1, 9, 1024, 256, generator=generator)

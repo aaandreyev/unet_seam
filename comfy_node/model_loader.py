@@ -47,7 +47,15 @@ def load_model(path: str, device: str = "cpu") -> tuple[torch.nn.Module, dict]:
     _validate_sidecar(sidecar)
     state = load_file(str(model_path), device=device)
     model = build_model_from_config(sidecar)
-    model.load_state_dict(state)
+    result = model.load_state_dict(state, strict=False)
+    if result.missing_keys or result.unexpected_keys:
+        # In production we want this visible but non-fatal: legacy exports omit
+        # attention_head, new ones include it. Print one short line for ops visibility.
+        print(
+            f"[seam_harmonizer] partial load: missing={list(result.missing_keys)[:6]} "
+            f"unexpected={list(result.unexpected_keys)[:6]}",
+            flush=True,
+        )
     model.eval().to(device)
     _MODEL_CACHE[key] = (model, sidecar)
     return model, sidecar

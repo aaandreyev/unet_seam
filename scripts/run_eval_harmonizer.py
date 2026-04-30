@@ -66,12 +66,24 @@ def main() -> None:
         correction_limits=model_cfg.get("correction_limits"),
     ).to(device)
     try:
-        model.load_state_dict(ckpt["ema"])
+        result = model.load_state_dict(ckpt["ema"], strict=False)
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
             "Checkpoint EMA weights are incompatible with SeamHarmonizerV3 evaluation. "
             "Use a v3-trained checkpoint or retrain via --load-weights first."
         ) from exc
+    if result.missing_keys or result.unexpected_keys:
+        print(
+            json.dumps(
+                {
+                    "event": "load_state_dict_partial",
+                    "missing": list(result.missing_keys)[:8],
+                    "unexpected": list(result.unexpected_keys)[:8],
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
     model.eval()
     dataset = _build_dataset(train_cfg, eval_cfg)
     loader = DataLoader(

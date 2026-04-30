@@ -135,6 +135,15 @@ class SeamHarmonizerV3(nn.Module):
             nn.SiLU(),
             nn.Conv2d(channels[2], 18, kernel_size=1),
         )
+        # Separate head for "where to act" supervision. Decoupled from gate (amplitude).
+        # Output is sigmoid([0,1]) and is NOT used in reconstruct_corrected_strip — only
+        # for loss supervision and inference-time diagnostics. Zero-init keeps legacy
+        # ckpt compatibility: missing keys load via strict=False without affecting outputs.
+        self.attention_head = nn.Sequential(
+            nn.Conv2d(channels[2], channels[2] // 2, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.Conv2d(channels[2] // 2, 1, kernel_size=1),
+        )
         self._init_identity()
 
     def _init_identity(self) -> None:
@@ -142,6 +151,10 @@ class SeamHarmonizerV3(nn.Module):
         if isinstance(last, nn.Conv2d):
             nn.init.zeros_(last.weight)
             nn.init.zeros_(last.bias)
+        attn_last = self.attention_head[-1]
+        if isinstance(attn_last, nn.Conv2d):
+            nn.init.zeros_(attn_last.weight)
+            nn.init.zeros_(attn_last.bias)
 
     def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
         feats = self.encoder(x)
@@ -162,11 +175,13 @@ class SeamHarmonizerV3(nn.Module):
             ],
             dim=1,
         )
-        coarse = self.coarse_head(self.coarse_adapter(fused))
+        adapted = self.coarse_adapter(fused)
+        coarse = self.coarse_head(adapted)
         gain_lowres, gamma_lowres, bias_lowres, mix_flat, detail_lowres, gate_lowres = torch.split(
             coarse, [1, 1, 3, 9, 3, 1], dim=1
         )
         mix_lowres = mix_flat.view(x.shape[0], 3, 3, coarse_h, coarse_w)
+        attention_lowres = torch.sigmoid(self.attention_head(adapted))
         recon = reconstruct_corrected_strip(
             x[:, :3],
             {
@@ -187,5 +202,6 @@ class SeamHarmonizerV3(nn.Module):
             "mix_lowres": mix_lowres,
             "detail_lowres": detail_lowres,
             "gate_lowres": gate_lowres,
+            "attention_lowres": attention_lowres,
             **recon,
         }

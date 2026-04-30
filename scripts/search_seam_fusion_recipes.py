@@ -37,7 +37,9 @@ def _load_model(checkpoint_path: Path, device: torch.device) -> tuple[SeamHarmon
         boundary_band_px=int(dataset_cfg.get("boundary_band_px", 24)),
         correction_limits=model_cfg.get("correction_limits"),
     ).to(device)
-    model.load_state_dict(ckpt["ema"])
+    result = model.load_state_dict(ckpt["ema"], strict=False)
+    if result.missing_keys or result.unexpected_keys:
+        print(json.dumps({"event": "load_state_dict_partial", "missing": list(result.missing_keys)[:8], "unexpected": list(result.unexpected_keys)[:8]}, ensure_ascii=False), flush=True)
     model.eval()
     return model, cfg
 
