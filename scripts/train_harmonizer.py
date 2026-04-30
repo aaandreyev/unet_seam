@@ -66,6 +66,7 @@ def _quality(metrics: dict[str, float]) -> float:
     de_gate_deficit = max(40.0 - rel_de, 0.0)
     mae_gate_deficit = max(50.0 - rel_mae, 0.0)
     conf_excess = max(conf_mean - 0.22, 0.0)
+    conf_high = max(conf_mean - 0.40, 0.0)
     detail_excess = max(detail_abs - 0.0045, 0.0)
     gain_excess = max(gain_abs - 0.05, 0.0)
     return (
@@ -75,8 +76,9 @@ def _quality(metrics: dict[str, float]) -> float:
         + 95.0 * delta_luma_profile
         + 60.0 * delta_chroma_profile
         + 120.0 * overcorr
-        + 12.0 * conf_align
-        + 55.0 * conf_excess
+        + 14.0 * conf_align
+        + 85.0 * conf_excess
+        + 120.0 * conf_high
         + 180.0 * detail_excess
         + 75.0 * gain_excess
         + 0.8 * de_gate_deficit
@@ -130,6 +132,7 @@ def _build_dataset(cfg: dict[str, Any], split: str, apply_corruption: bool = Tru
         boundary_band_px=int(dcfg.get("boundary_band_px", 24)),
         inner_widths=[int(dcfg.get("inner_width", 128))],
         apply_corruption=apply_corruption,
+        corruption_cfg=dcfg.get("corruptions"),
     )
 
 
@@ -233,7 +236,11 @@ def main() -> None:
     if device.type == "cuda":
         _assert_batch_within_cuda_index_limit(model.channels[0], strip_h, strip_w, train_bs, val_bs)
     materialized_manifest = cfg["dataset"].get("materialized_manifest")
-    gpu_corruption = GPUCorruption().to(device) if device.type == "cuda" and not materialized_manifest else None
+    gpu_corruption = (
+        GPUCorruption(corruption_cfg=dset.get("corruptions")).to(device)
+        if device.type == "cuda" and not materialized_manifest
+        else None
+    )
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(train_cfg["lr"]),

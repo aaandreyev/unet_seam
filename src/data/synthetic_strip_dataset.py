@@ -41,6 +41,7 @@ class SyntheticStripDataset(Dataset):
         boundary_band_px: int = 24,
         inner_widths: list[int] | None = None,
         apply_corruption: bool = True,
+        corruption_cfg: dict | None = None,
     ) -> None:
         self.manifest_root = manifest_path.parent.parent
         self.rows = [row for row in read_jsonl(manifest_path) if not split or row.get("split") == split]
@@ -50,6 +51,7 @@ class SyntheticStripDataset(Dataset):
         self.boundary_band_px = boundary_band_px
         self.inner_widths = inner_widths or [96, 128, 160, 192]
         self.apply_corruption = apply_corruption
+        self.corruption_cfg = corruption_cfg
         self.base_variants = self._build_base_variants()
 
     def _build_base_variants(self) -> list[SampleConfig]:
@@ -144,7 +146,11 @@ class SyntheticStripDataset(Dataset):
         input_rgb = clean_strip.unsqueeze(0)
         if self.apply_corruption:
             inner = input_rgb[..., self.spec.outer_width :]
-            corrupted = apply_random_corruptions(inner, torch.Generator().manual_seed(self.seed + idx))
+            corrupted = apply_random_corruptions(
+                inner,
+                torch.Generator().manual_seed(self.seed + idx),
+                corruption_cfg=self.corruption_cfg,
+            )
             input_rgb[..., self.spec.outer_width :] = corrupted.image
         built = build_harmonizer_input(
             input_rgb.squeeze(0),

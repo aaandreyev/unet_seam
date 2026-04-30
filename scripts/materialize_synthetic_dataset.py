@@ -81,6 +81,7 @@ def _build_dataset(cfg: dict[str, Any], manifest_path: Path) -> SyntheticStripDa
         boundary_band_px=int(dcfg.get("boundary_band_px", 24)),
         inner_widths=[int(dcfg.get("inner_width", 128))],
         apply_corruption=True,
+        corruption_cfg=dcfg.get("corruptions"),
     )
 
 
@@ -116,7 +117,11 @@ def _materialize_sample(dataset: SyntheticStripDataset, row_idx: int, sample_idx
     corrupted_ops: list[dict[str, object]] = []
     if dataset.apply_corruption:
         inner = input_rgb[..., dataset.spec.outer_width :]
-        corrupted = apply_random_corruptions(inner, torch.Generator().manual_seed(dataset.seed + sample_idx))
+        corrupted = apply_random_corruptions(
+            inner,
+            torch.Generator().manual_seed(dataset.seed + sample_idx),
+            corruption_cfg=dataset.corruption_cfg,
+        )
         input_rgb[..., dataset.spec.outer_width :] = corrupted.image
         corrupted_ops = corrupted.ops
     built = build_harmonizer_input(

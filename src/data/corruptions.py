@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -23,24 +24,31 @@ CORRUPTION_CFG = {
     "group_c_weights": [0.10, 0.08, 0.24, 0.32, 0.26],
     "group_d_weights": [0.28, 0.18, 0.18, 0.36],
     "spatial_probability": {
-        "ab": 0.55,
-        "d": 0.65,
+        "ab": 0.7,
+        "d": 0.7,
     },
     "field_bank": {
-        "macro_mix": {
-            "tonal_macro": 0.70,
-            "tonal_fine": 0.30,
-            "chroma_macro": 0.55,
-            "chroma_fine": 0.45,
-            "detail_macro": 0.25,
-            "detail_fine": 0.75,
-            "degrade_macro": 0.35,
-            "degrade_fine": 0.65,
-            "seam_macro": 0.55,
-            "seam_pref": 0.45,
-            "region_field": 0.65,
-            "region_seam": 0.35,
-        },
+        "macro_weight": (0.70, 0.85),
+        "native_res_fine_weight": (0.15, 0.30),
+        "native_res_gain": 2.0,
+        "native_res_fine_blur_sigma": (0.35, 0.90),
+        "native_res_noise_std": 0.10,
+        "native_res_gradient_count": (1, 4),
+        "native_res_gradient_amp": (0.03, 0.14),
+        "native_res_sin_count": (1, 5),
+        "native_res_sin_fx": (2.0, 12.0),
+        "native_res_sin_fy": (1.5, 8.0),
+        "native_res_sin_amp": (0.02, 0.10),
+        "native_res_ripple_count": (1, 4),
+        "native_res_ripple_freq": (1.5, 8.0),
+        "native_res_ripple_amp": (0.02, 0.10),
+        "native_res_blob_count": (2, 10),
+        "native_res_blob_sigma": (0.04, 0.18),
+        "native_res_blob_amp": (0.03, 0.12),
+        "seam_pref_macro": 0.18,
+        "seam_pref_fine": 0.08,
+        "region_field_weight": 0.92,
+        "region_seam_weight": 0.08,
         "region_sigmoid_scale": (1.8, 4.5),
     },
     "procedural_field": {
@@ -48,6 +56,7 @@ CORRUPTION_CFG = {
         "coarse_w": (8, 24, 12),
         "noise_std": 0.25,
         "gradient_weight": (-1.0, 1.0),
+        "gradient_count": (1, 4),
         "sin_count": (1, 4),
         "sin_fx": (0.5, 3.0),
         "sin_fy": (0.3, 2.0),
@@ -66,7 +75,7 @@ CORRUPTION_CFG = {
     "ops": {
         "brightness": {
             "base": (-0.10, 0.10),
-            "spatial_field_mix": (0.8, 0.2),
+            "spatial_field_mix": (0.95, 0.05),
             "spatial_floor": 0.015,
         },
         "exposure": {
@@ -161,11 +170,11 @@ CORRUPTION_CFG = {
         },
         "illumination_field": {
             "amp": (0.05, 0.16),
-            "field_mix": (0.70, 0.20),
+            "field_mix": (0.20, 0.80),
         },
         "temperature_field": {
             "amp": (0.05, 0.16),
-            "field_mix": (0.75, 0.25),
+            "field_mix": (0.90, 0.10),
             "blue_scale": 0.8,
         },
         "saturation_field": {
@@ -198,6 +207,21 @@ CORRUPTION_CFG = {
         },
     },
 }
+
+
+def _merged_spatial_probability(corruption_cfg: dict[str, Any] | None) -> dict[str, float]:
+    probs = dict(CORRUPTION_CFG["spatial_probability"])
+    if corruption_cfg:
+        probs.update((corruption_cfg.get("spatial_probability") or {}))
+    return probs
+
+
+def _preview_gain(corruption_cfg: dict[str, Any] | None) -> float:
+    if not corruption_cfg:
+        return 1.0
+    if corruption_cfg.get("aggressive_preview"):
+        return float(corruption_cfg.get("preview_gain", 3.0))
+    return float(corruption_cfg.get("preview_gain", 1.0))
 
 
 @dataclass
@@ -288,28 +312,42 @@ def _normalize_signed(field: torch.Tensor) -> torch.Tensor:
 
 
 def _resized_grid(h: int, w: int, coarse_h: int, coarse_w: int, device: torch.device, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
-    yy = torch.linspace(-1.0, 1.0, coarse_h, device=device, dtype=dtype).view(1, 1, coarse_h, 1)
-    xx = torch.linspace(-1.0, 1.0, coarse_w, device=device, dtype=dtype).view(1, 1, 1, coarse_w)
+    max_extent = float(max(h, w))
+    yy = torch.linspace(-float(h) / max_extent, float(h) / max_extent, coarse_h, device=device, dtype=dtype).view(1, 1, coarse_h, 1)
+    xx = torch.linspace(-float(w) / max_extent, float(w) / max_extent, coarse_w, device=device, dtype=dtype).view(1, 1, 1, coarse_w)
     return yy, xx
 
 
-def _procedural_field(shape: torch.Size, generator: torch.Generator, *, coarse_h: int | None = None, coarse_w: int | None = None) -> torch.Tensor:
+def _procedural_field(
+    shape: torch.Size,
+    generator: torch.Generator,
+    *,
+    coarse_h: int | None = None,
+    coarse_w: int | None = None,
+    corruption_cfg: dict[str, Any] | None = None,
+) -> torch.Tensor:
     cfg = CORRUPTION_CFG["procedural_field"]
+    gain = _preview_gain(corruption_cfg)
     b, _, h, w = shape
     coarse_h = coarse_h or max(cfg["coarse_h"][0], min(cfg["coarse_h"][1], h // cfg["coarse_h"][2]))
     coarse_w = coarse_w or max(cfg["coarse_w"][0], min(cfg["coarse_w"][1], w // cfg["coarse_w"][2]))
     device = torch.device("cpu")
     dtype = torch.float32
     yy, xx = _resized_grid(h, w, coarse_h, coarse_w, device, dtype)
-    field = torch.randn((b, 1, coarse_h, coarse_w), generator=generator, dtype=dtype) * cfg["noise_std"]
-    field += _u(generator, *cfg["gradient_weight"]) * xx
-    field += _u(generator, *cfg["gradient_weight"]) * yy
+    field = torch.randn((b, 1, coarse_h, coarse_w), generator=generator, dtype=dtype) * (cfg["noise_std"] * gain)
+    for _ in range(int(torch.randint(cfg["gradient_count"][0], cfg["gradient_count"][1], (1,), generator=generator).item())):
+        theta = _u(generator, 0.0, 2.0 * math.pi)
+        coord = math.cos(theta) * xx + math.sin(theta) * yy
+        field += gain * _u(generator, *cfg["gradient_weight"]) * coord
     for _ in range(int(torch.randint(cfg["sin_count"][0], cfg["sin_count"][1], (1,), generator=generator).item())):
+        theta = _u(generator, 0.0, 2.0 * math.pi)
+        u = math.cos(theta) * xx + math.sin(theta) * yy
+        v = -math.sin(theta) * xx + math.cos(theta) * yy
         fx = _u(generator, *cfg["sin_fx"])
         fy = _u(generator, *cfg["sin_fy"])
         phase = _u(generator, -math.pi, math.pi)
         amp = _u(generator, *cfg["sin_amp"])
-        field += amp * torch.sin(fx * math.pi * xx + fy * math.pi * yy + phase)
+        field += gain * amp * torch.sin(fx * math.pi * u + fy * math.pi * v + phase)
     for _ in range(int(torch.randint(cfg["blob_count"][0], cfg["blob_count"][1], (1,), generator=generator).item())):
         cx = _u(generator, *cfg["blob_center"])
         cy = _u(generator, *cfg["blob_center"])
@@ -317,63 +355,138 @@ def _procedural_field(shape: torch.Size, generator: torch.Generator, *, coarse_h
         sy = _u(generator, *cfg["blob_sigma"])
         amp = _u(generator, *cfg["blob_amp"]) * (1.0 if torch.rand(1, generator=generator).item() < 0.5 else -1.0)
         blob = torch.exp(-(((xx - cx) ** 2) / (2.0 * sx * sx) + ((yy - cy) ** 2) / (2.0 * sy * sy)))
-        field += amp * blob
+        field += gain * amp * blob
     field = _gaussian_blur(field, _u(generator, *cfg["blur_sigma"]))
     field = F.interpolate(field, size=(h, w), mode="bilinear", align_corners=False)
     return _normalize_signed(field)
 
 
-def _build_artifact_field_bank(shape: torch.Size, generator: torch.Generator) -> ArtifactFieldBank:
+def _build_artifact_field_bank(
+    shape: torch.Size,
+    generator: torch.Generator,
+    corruption_cfg: dict[str, Any] | None = None,
+) -> ArtifactFieldBank:
     cfg = CORRUPTION_CFG["field_bank"]
-    mix = cfg["macro_mix"]
-    _, _, h, _ = shape
-    macro = _procedural_field(shape, generator)
-    tonal = _normalize_signed(mix["tonal_macro"] * macro + mix["tonal_fine"] * _procedural_field(shape, generator))
-    chroma = _normalize_signed(mix["chroma_macro"] * macro + mix["chroma_fine"] * _procedural_field(shape, generator))
-    detail = _normalize_signed(
-        mix["detail_macro"] * macro
-        + mix["detail_fine"] * _procedural_field(shape, generator, coarse_h=max(16, min(48, h // 24)), coarse_w=max(10, min(32, shape[-1] // 6)))
-    )
-    degrade = _normalize_signed(mix["degrade_macro"] * macro + mix["degrade_fine"] * _procedural_field(shape, generator))
+    gain = _preview_gain(corruption_cfg)
+    _, _, h, w = shape
+    macro = _procedural_field(shape, generator, corruption_cfg=corruption_cfg)
+
+    def _native_res_fine_field() -> torch.Tensor:
+        device = torch.device("cpu")
+        dtype = torch.float32
+        max_extent = float(max(h, w))
+        yy = torch.linspace(-float(h) / max_extent, float(h) / max_extent, h, device=device, dtype=dtype).view(1, 1, h, 1)
+        xx = torch.linspace(-float(w) / max_extent, float(w) / max_extent, w, device=device, dtype=dtype).view(1, 1, 1, w)
+        field = torch.randn((shape[0], 1, h, w), generator=generator, dtype=dtype) * (cfg["native_res_noise_std"] * gain)
+        for _ in range(int(torch.randint(cfg["native_res_gradient_count"][0], cfg["native_res_gradient_count"][1], (1,), generator=generator).item())):
+            theta = _u(generator, 0.0, 2.0 * math.pi)
+            grad_amp = _u(generator, *cfg["native_res_gradient_amp"])
+            coord = math.cos(theta) * xx + math.sin(theta) * yy
+            field += gain * grad_amp * coord
+        for _ in range(int(torch.randint(cfg["native_res_sin_count"][0], cfg["native_res_sin_count"][1], (1,), generator=generator).item())):
+            theta = _u(generator, 0.0, 2.0 * math.pi)
+            u = math.cos(theta) * xx + math.sin(theta) * yy
+            v = -math.sin(theta) * xx + math.cos(theta) * yy
+            fx = _u(generator, *cfg["native_res_sin_fx"])
+            fy = _u(generator, *cfg["native_res_sin_fy"])
+            phase = _u(generator, -math.pi, math.pi)
+            amp = _u(generator, *cfg["native_res_sin_amp"])
+            field += gain * amp * torch.sin(fx * math.pi * u + fy * math.pi * v + phase)
+        for _ in range(int(torch.randint(cfg["native_res_ripple_count"][0], cfg["native_res_ripple_count"][1], (1,), generator=generator).item())):
+            cx = _u(generator, -1.0, 1.0)
+            cy = _u(generator, -1.0, 1.0)
+            ripple_freq = _u(generator, *cfg["native_res_ripple_freq"])
+            ripple_amp = _u(generator, *cfg["native_res_ripple_amp"])
+            radius = torch.sqrt((xx - cx) ** 2 + (yy - cy) ** 2 + 1e-6)
+            phase = _u(generator, -math.pi, math.pi)
+            field += gain * ripple_amp * torch.sin(radius * ripple_freq * math.pi + phase)
+        for _ in range(int(torch.randint(cfg["native_res_blob_count"][0], cfg["native_res_blob_count"][1], (1,), generator=generator).item())):
+            cx = _u(generator, -1.0, 1.0)
+            cy = _u(generator, -1.0, 1.0)
+            sx = _u(generator, *cfg["native_res_blob_sigma"])
+            sy = _u(generator, *cfg["native_res_blob_sigma"])
+            amp = _u(generator, *cfg["native_res_blob_amp"]) * (1.0 if torch.rand(1, generator=generator).item() < 0.5 else -1.0)
+            blob = torch.exp(-(((xx - cx) ** 2) / (2.0 * sx * sx) + ((yy - cy) ** 2) / (2.0 * sy * sy)))
+            field += gain * amp * blob
+        field = _gaussian_blur(field, _u(generator, *cfg["native_res_fine_blur_sigma"]))
+        return _normalize_signed(field)
+
+    def _macro_plus_native() -> torch.Tensor:
+        macro_weight = _u(generator, *cfg["macro_weight"])
+        fine_weight = 1.0 - macro_weight
+        fine_weight = min(max(fine_weight, cfg["native_res_fine_weight"][0]), cfg["native_res_fine_weight"][1])
+        macro_weight = 1.0 - fine_weight
+        return _normalize_signed(macro_weight * macro + fine_weight * cfg["native_res_gain"] * gain * _native_res_fine_field())
+
+    tonal = _macro_plus_native()
+    chroma = _macro_plus_native()
+    detail = _macro_plus_native()
+    degrade = _macro_plus_native()
     xs = torch.linspace(1.0, -1.0, shape[-1], dtype=torch.float32).view(1, 1, 1, shape[-1])
     seam_pref = xs.expand(shape[0], 1, h, shape[-1])
-    seam_bias = _normalize_signed(mix["seam_macro"] * macro + mix["seam_pref"] * seam_pref)
-    region_logits = mix["region_field"] * _procedural_field(shape, generator) + mix["region_seam"] * seam_bias
+    seam_bias = _normalize_signed(cfg["seam_pref_macro"] * _macro_plus_native() + cfg["seam_pref_fine"] * seam_pref)
+    region_logits = cfg["region_field_weight"] * _macro_plus_native() + cfg["region_seam_weight"] * seam_bias
     region = torch.sigmoid(region_logits * _u(generator, *cfg["region_sigmoid_scale"]))
     return ArtifactFieldBank(tonal=tonal, chroma=chroma, detail=detail, degrade=degrade, region=region, seam_bias=seam_bias)
 
 
-def _spatial_additive(base: float, field: torch.Tensor, generator: torch.Generator, floor: float) -> torch.Tensor:
+def _spatial_additive(base: float, field: torch.Tensor, generator: torch.Generator, floor: float, corruption_cfg: dict[str, Any] | None = None) -> torch.Tensor:
     scale = CORRUPTION_CFG["spatial_helpers"]["additive_span_scale"]
-    span = max(abs(base) * _u(generator, *scale), floor)
+    span = max(abs(base) * _u(generator, *scale), floor) * _preview_gain(corruption_cfg)
     return base + field * span
 
 
-def _spatial_factor(base: float, field: torch.Tensor, generator: torch.Generator, *, floor: float, min_value: float, max_value: float) -> torch.Tensor:
+def _spatial_factor(
+    base: float,
+    field: torch.Tensor,
+    generator: torch.Generator,
+    *,
+    floor: float,
+    min_value: float,
+    max_value: float,
+    corruption_cfg: dict[str, Any] | None = None,
+) -> torch.Tensor:
     scale = CORRUPTION_CFG["spatial_helpers"]["factor_span_scale"]
-    span = max(abs(base - 1.0) * _u(generator, *scale), floor)
+    span = max(abs(base - 1.0) * _u(generator, *scale), floor) * _preview_gain(corruption_cfg)
     return (base + field * span).clamp(min_value, max_value)
 
 
-def _spatial_amount(base: float, field: torch.Tensor, generator: torch.Generator, max_value: float) -> torch.Tensor:
+def _spatial_amount(base: float, field: torch.Tensor, generator: torch.Generator, max_value: float, corruption_cfg: dict[str, Any] | None = None) -> torch.Tensor:
     scale = CORRUPTION_CFG["spatial_helpers"]["amount_span_scale"]
-    span = max(base * _u(generator, *scale), max_value * 0.10)
+    span = max(base * _u(generator, *scale), max_value * 0.10) * _preview_gain(corruption_cfg)
     return (base + field * span).clamp(0.0, max_value)
 
 
-def _apply_corruption_op(name: str, x: torch.Tensor, generator: torch.Generator, fields: ArtifactFieldBank, *, use_spatial: bool | None = None) -> torch.Tensor:
+def _apply_corruption_op(
+    name: str,
+    x: torch.Tensor,
+    generator: torch.Generator,
+    fields: ArtifactFieldBank,
+    *,
+    use_spatial: bool | None = None,
+    corruption_cfg: dict[str, Any] | None = None,
+) -> torch.Tensor:
     cfg = _pick_cfg(name)
+    preview_gain = _preview_gain(corruption_cfg)
     if use_spatial is None:
-        use_spatial = name in GROUPS["C"] or (torch.rand(1, generator=generator).item() < (CORRUPTION_CFG["spatial_probability"]["d"] if name in GROUPS["D"] else CORRUPTION_CFG["spatial_probability"]["ab"]))
+        spatial_probability = _merged_spatial_probability(corruption_cfg)
+        use_spatial = name in GROUPS["C"] or (
+            torch.rand(1, generator=generator).item()
+            < (spatial_probability["d"] if name in GROUPS["D"] else spatial_probability["ab"])
+        )
     bank = fields
     x = x.to(dtype=torch.float32)
     if name == "brightness":
         delta = _u(generator, *cfg["base"])
-        x = x + (_spatial_additive(delta, cfg["spatial_field_mix"][0] * bank.tonal + cfg["spatial_field_mix"][1] * bank.seam_bias, generator, cfg["spatial_floor"]) if use_spatial else delta)
+        x = x + (
+            _spatial_additive(delta, cfg["spatial_field_mix"][0] * bank.tonal + cfg["spatial_field_mix"][1] * bank.seam_bias, generator, cfg["spatial_floor"], corruption_cfg)
+            if use_spatial
+            else delta
+        )
     elif name == "exposure":
         ev = _u(generator, *cfg["base"])
         if use_spatial:
-            ev_map = _spatial_additive(ev, bank.tonal, generator, cfg["spatial_floor"])
+            ev_map = _spatial_additive(ev, bank.tonal, generator, cfg["spatial_floor"], corruption_cfg)
             x = x * torch.pow(torch.full_like(ev_map, 2.0), ev_map)
         else:
             x = x * (2.0**ev)
@@ -381,30 +494,30 @@ def _apply_corruption_op(name: str, x: torch.Tensor, generator: torch.Generator,
         contrast = _u(generator, *cfg["base"])
         mean = x.mean(dim=(-2, -1), keepdim=True)
         if use_spatial:
-            contrast_map = _spatial_factor(contrast, cfg["spatial_field_mix"][0] * bank.tonal + cfg["spatial_field_mix"][1] * bank.region, generator, floor=cfg["spatial_floor"], min_value=cfg["clamp"][0], max_value=cfg["clamp"][1])
+            contrast_map = _spatial_factor(contrast, cfg["spatial_field_mix"][0] * bank.tonal + cfg["spatial_field_mix"][1] * bank.region, generator, floor=cfg["spatial_floor"], min_value=cfg["clamp"][0], max_value=cfg["clamp"][1], corruption_cfg=corruption_cfg)
             x = (x - mean) * contrast_map + mean
         else:
             x = (x - mean) * contrast + mean
     elif name == "gamma":
         gamma = _u(generator, *cfg["base"])
-        x = _apply_gamma(x, _spatial_factor(gamma, bank.tonal, generator, floor=cfg["spatial_floor"], min_value=cfg["clamp"][0], max_value=cfg["clamp"][1]) if use_spatial else gamma)
+        x = _apply_gamma(x, _spatial_factor(gamma, bank.tonal, generator, floor=cfg["spatial_floor"], min_value=cfg["clamp"][0], max_value=cfg["clamp"][1], corruption_cfg=corruption_cfg) if use_spatial else gamma)
     elif name == "saturation":
         sat = _u(generator, *cfg["base"])
         luma = _rgb_to_luma(x)
-        x = luma + (x - luma) * (_spatial_factor(sat, bank.chroma, generator, floor=cfg["spatial_floor"], min_value=cfg["clamp"][0], max_value=cfg["clamp"][1]) if use_spatial else sat)
+        x = luma + (x - luma) * (_spatial_factor(sat, bank.chroma, generator, floor=cfg["spatial_floor"], min_value=cfg["clamp"][0], max_value=cfg["clamp"][1], corruption_cfg=corruption_cfg) if use_spatial else sat)
     elif name == "hue":
         angle = _u(generator, *cfg["base"])
         luma = _rgb_to_luma(x)
         centered = x - luma
         if use_spatial:
-            angle_map = _spatial_additive(angle, bank.chroma, generator, cfg["spatial_floor"]).clamp(cfg["clamp"][0], cfg["clamp"][1])
+            angle_map = _spatial_additive(angle, bank.chroma, generator, cfg["spatial_floor"], corruption_cfg).clamp(cfg["clamp"][0], cfg["clamp"][1])
             x = luma + centered.roll(shifts=1, dims=1) * angle_map + centered * (1.0 - angle_map.abs())
         else:
             x = luma + centered.roll(shifts=1, dims=1) * angle + centered * (1.0 - abs(angle))
     elif name == "temperature":
         t = _u(generator, *cfg["base"])
         if use_spatial:
-            t_map = _spatial_additive(t, bank.chroma, generator, cfg["spatial_floor"]).clamp(cfg["clamp"][0], cfg["clamp"][1])
+            t_map = _spatial_additive(t, bank.chroma, generator, cfg["spatial_floor"], corruption_cfg).clamp(cfg["clamp"][0], cfg["clamp"][1])
             x[:, 0:1] += t_map
             x[:, 2:3] -= t_map
         else:
@@ -412,7 +525,7 @@ def _apply_corruption_op(name: str, x: torch.Tensor, generator: torch.Generator,
             x[:, 2:3] -= t
     elif name == "tint":
         t = _u(generator, *cfg["base"])
-        x[:, 1:2] += _spatial_additive(t, bank.chroma, generator, cfg["spatial_floor"]).clamp(cfg["clamp"][0], cfg["clamp"][1]) if use_spatial else t
+        x[:, 1:2] += _spatial_additive(t, bank.chroma, generator, cfg["spatial_floor"], corruption_cfg).clamp(cfg["clamp"][0], cfg["clamp"][1]) if use_spatial else t
     elif name == "channel_gains":
         gains = torch.empty((1, 3, 1, 1)).uniform_(*cfg["base"], generator=generator).to(dtype=x.dtype)
         if use_spatial:
@@ -423,86 +536,86 @@ def _apply_corruption_op(name: str, x: torch.Tensor, generator: torch.Generator,
             x = x * gains
     elif name == "black_point":
         black = _u(generator, *cfg["base"])
-        black_val = _spatial_additive(black, bank.tonal, generator, cfg["spatial_floor"]).clamp(cfg["clamp"][0], cfg["clamp"][1]) if use_spatial else black
+        black_val = _spatial_additive(black, bank.tonal, generator, cfg["spatial_floor"], corruption_cfg).clamp(cfg["clamp"][0], cfg["clamp"][1]) if use_spatial else black
         x = (x - black_val) / ((1.0 - black_val).clamp_min(1e-3) if isinstance(black_val, torch.Tensor) else max(1.0 - black_val, 1e-3))
     elif name == "white_point":
         white = _u(generator, *cfg["base"])
-        white_val = _spatial_factor(white, bank.tonal, generator, floor=cfg["spatial_floor"], min_value=cfg["clamp"][0], max_value=cfg["clamp"][1]) if use_spatial else white
+        white_val = _spatial_factor(white, bank.tonal, generator, floor=cfg["spatial_floor"], min_value=cfg["clamp"][0], max_value=cfg["clamp"][1], corruption_cfg=corruption_cfg) if use_spatial else white
         x = x / (white_val.clamp_min(1e-3) if isinstance(white_val, torch.Tensor) else max(white_val, 1e-3))
     elif name == "shadow_lift":
         amount = _u(generator, *cfg["base"])
-        amount_val = _spatial_amount(amount, cfg["field_mix"][0] * bank.tonal + cfg["field_mix"][1] * bank.region, generator, cfg["max_value"]) if use_spatial else amount
+        amount_val = _spatial_amount(amount, cfg["field_mix"][0] * bank.tonal + cfg["field_mix"][1] * bank.region, generator, cfg["max_value"], corruption_cfg) if use_spatial else amount
         x = x + (1.0 - x) * amount_val * (1.0 - x).pow(2)
     elif name == "shadow_crush":
         amount = _u(generator, *cfg["base"])
-        amount_val = _spatial_amount(amount, cfg["field_mix"][0] * bank.tonal + cfg["field_mix"][1] * bank.region, generator, cfg["max_value"]) if use_spatial else amount
+        amount_val = _spatial_amount(amount, cfg["field_mix"][0] * bank.tonal + cfg["field_mix"][1] * bank.region, generator, cfg["max_value"], corruption_cfg) if use_spatial else amount
         x = x - amount_val * (1.0 - x).pow(2)
     elif name == "highlight_compress":
         amount = _u(generator, *cfg["base"])
-        amount_val = _spatial_amount(amount, bank.tonal, generator, cfg["max_value"]) if use_spatial else amount
+        amount_val = _spatial_amount(amount, bank.tonal, generator, cfg["max_value"], corruption_cfg) if use_spatial else amount
         x = x - amount_val * x.pow(2)
     elif name == "highlight_boost":
         amount = _u(generator, *cfg["base"])
-        amount_val = _spatial_amount(amount, bank.tonal, generator, cfg["max_value"]) if use_spatial else amount
+        amount_val = _spatial_amount(amount, bank.tonal, generator, cfg["max_value"], corruption_cfg) if use_spatial else amount
         x = x + amount_val * x.pow(2)
     elif name == "midtone":
         amount = _u(generator, *cfg["base"])
-        amount_val = _spatial_additive(amount, bank.tonal, generator, cfg["spatial_floor"]).clamp(cfg["clamp"][0], cfg["clamp"][1]) if use_spatial else amount
+        amount_val = _spatial_additive(amount, bank.tonal, generator, cfg["spatial_floor"], corruption_cfg).clamp(cfg["clamp"][0], cfg["clamp"][1]) if use_spatial else amount
         x = x + amount_val * torch.sin(x * math.pi)
     elif name == "s_curve":
         amount = _u(generator, *cfg["base"])
-        x = x + (_spatial_amount(amount, bank.tonal, generator, cfg["max_value"]) if use_spatial else amount) * (x - 0.5) * (1.0 - (2.0 * x - 1.0).abs())
+        x = x + (_spatial_amount(amount, bank.tonal, generator, cfg["max_value"], corruption_cfg) if use_spatial else amount) * (x - 0.5) * (1.0 - (2.0 * x - 1.0).abs())
     elif name == "reverse_s_curve":
         amount = _u(generator, *cfg["base"])
-        x = x - (_spatial_amount(amount, bank.tonal, generator, cfg["max_value"]) if use_spatial else amount) * (x - 0.5) * (1.0 - (2.0 * x - 1.0).abs())
+        x = x - (_spatial_amount(amount, bank.tonal, generator, cfg["max_value"], corruption_cfg) if use_spatial else amount) * (x - 0.5) * (1.0 - (2.0 * x - 1.0).abs())
     elif name == "horizontal_luma_gradient":
         xx = torch.linspace(-1.0, 1.0, x.shape[-1], device=x.device, dtype=x.dtype).view(1, 1, 1, x.shape[-1])
-        amp = _u(generator, *cfg["base"])
+        amp = preview_gain * _u(generator, *cfg["base"])
         pattern = _normalize_signed(cfg["field_mix"][0] * xx + cfg["field_mix"][1] * bank.tonal.to(device=x.device, dtype=x.dtype))
         x = x + pattern * amp
     elif name == "vertical_luma_gradient":
         yy = torch.linspace(-1.0, 1.0, x.shape[-2], device=x.device, dtype=x.dtype).view(1, 1, x.shape[-2], 1)
-        amp = _u(generator, *cfg["base"])
+        amp = preview_gain * _u(generator, *cfg["base"])
         pattern = _normalize_signed(cfg["field_mix"][0] * yy + cfg["field_mix"][1] * bank.tonal.to(device=x.device, dtype=x.dtype))
         x = x + pattern * amp
     elif name == "illumination_field":
-        amp = _u(generator, *cfg["amp"])
+        amp = preview_gain * _u(generator, *cfg["amp"])
         field = _normalize_signed(cfg["field_mix"][0] * bank.seam_bias + cfg["field_mix"][1] * bank.tonal).to(device=x.device, dtype=x.dtype)
         x = x * (1.0 + field * amp)
     elif name == "temperature_field":
-        amp = _u(generator, *cfg["amp"])
+        amp = preview_gain * _u(generator, *cfg["amp"])
         field = _normalize_signed(cfg["field_mix"][0] * bank.chroma + cfg["field_mix"][1] * bank.seam_bias).to(device=x.device, dtype=x.dtype) * amp
         x[:, 0:1] += field
         x[:, 2:3] -= field * cfg["blue_scale"]
     elif name == "saturation_field":
         field = _normalize_signed(cfg["field_mix"][0] * bank.chroma + cfg["field_mix"][1] * bank.tonal).to(device=x.device, dtype=x.dtype)
         luma = _rgb_to_luma(x)
-        x = luma + (x - luma) * (1.0 + field * _u(generator, *cfg["amp"])).clamp(cfg["clamp"][0], cfg["clamp"][1])
+        x = luma + (x - luma) * (1.0 + field * (preview_gain * _u(generator, *cfg["amp"]))).clamp(cfg["clamp"][0], cfg["clamp"][1])
     elif name == "blur":
         sigma = _u(generator, *cfg["base"])
         blurred = _gaussian_blur(x, sigma)
         if use_spatial:
-            mix = (cfg["mix_floor"] + cfg["mix_scale"] * bank.region).to(device=x.device, dtype=x.dtype) * _u(generator, *cfg["mix_strength"])
+            mix = (cfg["mix_floor"] + cfg["mix_scale"] * bank.region).to(device=x.device, dtype=x.dtype) * min(preview_gain * _u(generator, *cfg["mix_strength"]), 1.0)
             x = x + mix.clamp(0.0, 1.0) * (blurred - x)
         else:
             x = blurred
     elif name == "noise":
         sigma = _u(generator, *cfg["base"])
         if use_spatial:
-            sigma_map = (cfg["mix_floor"] + cfg["mix_scale"] * bank.degrade.abs()).to(device=x.device, dtype=x.dtype) * max(sigma, cfg["sigma_floor"])
+            sigma_map = (cfg["mix_floor"] + cfg["mix_scale"] * bank.degrade.abs()).to(device=x.device, dtype=x.dtype) * max(preview_gain * sigma, cfg["sigma_floor"])
             x = x + torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator) * sigma_map
         else:
             x = x + torch.randn(x.shape, device=x.device, dtype=x.dtype, generator=generator) * sigma
     elif name == "microcontrast":
         amount = _u(generator, *cfg["base"])
         blur = _gaussian_blur(x, cfg["blur_sigma"])
-        x = x + (x - blur) * (_spatial_amount(amount, bank.detail, generator, cfg["max_value"]) if use_spatial else amount)
+        x = x + (x - blur) * (_spatial_amount(amount, bank.detail, generator, cfg["max_value"], corruption_cfg) if use_spatial else amount)
     elif name == "jpeg_like":
         lo, hi = cfg["levels"]
         levels = int(torch.randint(lo, hi, (1,), generator=generator).item())
         quantized = torch.round(x.clamp(0.0, 1.0) * float(levels)) / float(levels)
         if use_spatial:
-            mix = (cfg["mix_floor"] + cfg["mix_scale"] * bank.region).to(device=x.device, dtype=x.dtype) * _u(generator, *cfg["mix_strength"])
+            mix = (cfg["mix_floor"] + cfg["mix_scale"] * bank.region).to(device=x.device, dtype=x.dtype) * min(preview_gain * _u(generator, *cfg["mix_strength"]), 1.0)
             x = x + mix.clamp(0.0, 1.0) * (quantized - x)
         else:
             x = quantized
@@ -511,20 +624,29 @@ def _apply_corruption_op(name: str, x: torch.Tensor, generator: torch.Generator,
     return x.clamp(0.0, 1.0)
 
 
-def apply_random_corruptions(inner: torch.Tensor, generator: torch.Generator) -> CorruptionResult:
+def apply_random_corruptions(
+    inner: torch.Tensor,
+    generator: torch.Generator,
+    corruption_cfg: dict[str, Any] | None = None,
+) -> CorruptionResult:
     x = inner.clone().to(dtype=torch.float32)
     ops: list[str] = []
-    fields = _build_artifact_field_bank(x.shape, generator)
-    n_ops = int(torch.multinomial(torch.tensor(CORRUPTION_CFG["op_count_weights"]), 1, generator=generator).item()) + 2
+    fields = _build_artifact_field_bank(x.shape, generator, corruption_cfg=corruption_cfg)
+    group_c_probability = float((corruption_cfg or {}).get("group_c_probability", CORRUPTION_CFG["group_c_probability"]))
+    group_d_probability = float((corruption_cfg or {}).get("group_d_probability", CORRUPTION_CFG["group_d_probability"]))
+    op_count_weights = (corruption_cfg or {}).get("op_count_weights", CORRUPTION_CFG["op_count_weights"])
+    n_ops = int(torch.multinomial(torch.tensor(op_count_weights), 1, generator=generator).item()) + 2
+    if (corruption_cfg or {}).get("aggressive_preview"):
+        n_ops = max(n_ops, 4)
     chosen = [_pick_unique(GROUPS["A"] + GROUPS["B"], [], generator)]
-    if torch.rand(1, generator=generator).item() < CORRUPTION_CFG["group_c_probability"]:
+    if torch.rand(1, generator=generator).item() < group_c_probability:
         chosen.append(_pick_weighted_unique(GROUPS["C"], CORRUPTION_CFG["group_c_weights"], chosen, generator))
-    if torch.rand(1, generator=generator).item() < CORRUPTION_CFG["group_d_probability"]:
+    if torch.rand(1, generator=generator).item() < group_d_probability:
         chosen.append(_pick_weighted_unique(GROUPS["D"], CORRUPTION_CFG["group_d_weights"], chosen, generator))
     candidates = GROUPS["A"] + GROUPS["B"]
     while len(chosen) < n_ops:
         chosen.append(_pick_unique(candidates, chosen, generator))
     for name in chosen[:n_ops]:
-        x = _apply_corruption_op(name, x, generator, fields)
+        x = _apply_corruption_op(name, x, generator, fields, corruption_cfg=corruption_cfg)
         ops.append(name)
     return CorruptionResult(x.clamp(0.0, 1.0).to(dtype=inner.dtype, device=inner.device), ops)

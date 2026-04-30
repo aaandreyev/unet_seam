@@ -94,6 +94,25 @@ def test_spatial_twin_of_brightness_is_nonuniform():
     assert not torch.allclose(luma[:, :, :16], luma[:, :, -16:], atol=1e-4)
 
 
+def test_corruption_spatial_probability_override_biases_selection():
+    inner = torch.full((1, 3, 64, 64), 0.5)
+    spatial_hits = 0
+    trials = 400
+    for seed in range(trials):
+        generator = torch.Generator().manual_seed(seed)
+        fields = _build_artifact_field_bank(inner.shape, generator)
+        out = _apply_corruption_op(
+            "brightness",
+            inner,
+            generator,
+            fields,
+            corruption_cfg={"spatial_probability": {"ab": 0.8}},
+        )
+        luma = out.mean(dim=1)
+        spatial_hits += int(float(luma.std()) > 1e-3)
+    assert 0.68 <= spatial_hits / trials <= 0.90
+
+
 def test_spec_synthetic_dataset_builds_v3_input(tmp_path: Path):
     img = (np.random.rand(1024, 1024, 3) * 255).astype("uint8")
     img_path = tmp_path / "source.png"

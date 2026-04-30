@@ -142,6 +142,7 @@ class TestLossAndMetrics:
             "l_profile",
             "l_conf_align",
             "l_conf_metric",
+            "l_conf_budget",
             "l_overcorr",
             "l_gate",
             "l_field",

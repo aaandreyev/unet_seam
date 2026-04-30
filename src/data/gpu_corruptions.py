@@ -3,6 +3,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 from torch import Tensor
+from typing import Any
 
 from src.data.corruptions import apply_random_corruptions
 
@@ -14,15 +15,25 @@ class GPUCorruption(nn.Module):
     so cached triplets and GPU training samples follow the same corruption family.
     """
 
-    def __init__(self, p_c: float = 0.5, p_d: float = 0.2) -> None:
+    def __init__(
+        self,
+        p_c: float = 0.5,
+        p_d: float = 0.2,
+        corruption_cfg: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__()
         self.p_c = p_c
         self.p_d = p_d
+        self.corruption_cfg = corruption_cfg
 
     @torch.no_grad()
     def forward(self, inner: Tensor, gen: torch.Generator | None = None) -> Tensor:
         outputs = []
         for sample in inner.split(1, dim=0):
-            result = apply_random_corruptions(sample, gen if gen is not None else torch.Generator(device=sample.device))
+            result = apply_random_corruptions(
+                sample,
+                gen if gen is not None else torch.Generator(device=sample.device),
+                corruption_cfg=self.corruption_cfg,
+            )
             outputs.append(result.image)
         return torch.cat(outputs, dim=0).clamp(0.0, 1.0)

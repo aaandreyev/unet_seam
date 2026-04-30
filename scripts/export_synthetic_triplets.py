@@ -52,6 +52,7 @@ def _build_dataset(
         boundary_band_px=int(dcfg.get("boundary_band_px", 24)),
         inner_widths=[int(dcfg.get("inner_width", 128))],
         apply_corruption=True,
+        corruption_cfg=dcfg.get("corruptions"),
     )
 
 

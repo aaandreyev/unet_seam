@@ -150,6 +150,7 @@ class HarmonizerLossComputer:
             "profile": 0.55,
             "conf_align": 0.18,
             "conf_metric": 1.0e-8,
+            "conf_budget": 1.0e-8,
             "overcorr": 0.22,
             "gain_reg": 1.0e-8,
         }
@@ -215,6 +216,8 @@ class HarmonizerLossComputer:
         metric_target_conf = ((target - input_inner).abs().mean(dim=1, keepdim=True) / 0.08).clamp(0.0, 1.0)
         conf_metric_err = charbonnier(outputs["confidence"] - metric_target_conf)
         l_conf_metric = 0.35 * _masked_mean(conf_metric_err, seam_weight) + 0.65 * _masked_mean(conf_metric_err, full_mask)
+        sample_conf_mean = outputs["confidence"].mean(dim=(-2, -1), keepdim=True)
+        l_conf_budget = F.relu(sample_conf_mean - 0.24).mean()
         delta_pred_mag = gaussian_blur_tensor((pred - input_inner).abs(), self.low_sigma).mean(dim=1, keepdim=True)
         delta_target_mag = gaussian_blur_tensor((target - input_inner).abs(), self.low_sigma).mean(dim=1, keepdim=True)
         overcorr_map = (delta_pred_mag - delta_target_mag).clamp_min(0.0)
@@ -251,6 +254,7 @@ class HarmonizerLossComputer:
             + w["profile"] * l_profile
             + w["conf_align"] * l_conf_align
             + w["conf_metric"] * l_conf_metric
+            + w["conf_budget"] * l_conf_budget
             + w["overcorr"] * l_overcorr
             + w["gate"] * l_gate
             + w["field"] * l_field
@@ -270,6 +274,7 @@ class HarmonizerLossComputer:
             "l_profile": l_profile,
             "l_conf_align": l_conf_align,
             "l_conf_metric": l_conf_metric,
+            "l_conf_budget": l_conf_budget,
             "l_overcorr": l_overcorr,
             "l_gate": l_gate,
             "l_field": l_field,

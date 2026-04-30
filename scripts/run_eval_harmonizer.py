@@ -43,6 +43,7 @@ def _build_dataset(train_cfg: dict[str, Any], eval_cfg: dict[str, Any]) -> Synth
         ),
         boundary_band_px=int(dcfg.get("boundary_band_px", 24)),
         inner_widths=[int(dcfg.get("inner_width", 128))],
+        corruption_cfg=dcfg.get("corruptions"),
     )
 
 
