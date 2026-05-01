@@ -27,7 +27,7 @@ class SeamHarmonizerV3Node:
                 "MASK": ("MASK",),
                 "model_path": ("STRING", {"default": default_model}),
                 "inner_width": ("INT", {"default": 128}),
-                "inner_falloff_px": ("INT", {"default": 128, "min": 0, "max": 1024, "step": 1}),
+                "inner_falloff_px": ("INT", {"default": 48, "min": 0, "max": 127, "step": 1}),
                 "strength": ("FLOAT", {"default": 1.0}),
                 "process_left": ("BOOLEAN", {"default": True}),
                 "process_right": ("BOOLEAN", {"default": True}),

@@ -32,7 +32,7 @@ class SeamHarmonizerHybridNode:
                 "route_mode": (["auto", "ml", "cv", "blend"], {"default": "auto"}),
                 "region": (["inside", "outside", "both"], {"default": "inside"}),
                 "inner_width": ("INT", {"default": 128}),
-                "inner_falloff_px": ("INT", {"default": 128, "min": 0, "max": 1024, "step": 1}),
+                "inner_falloff_px": ("INT", {"default": 48, "min": 0, "max": 127, "step": 1}),
                 "strength": ("FLOAT", {"default": 1.0}),
                 "strip_width": ("INT", {"default": 8, "min": 1, "max": 128, "step": 1}),
                 "blur_sigma": ("FLOAT", {"default": 20.0, "min": 0.0, "max": 200.0, "step": 1.0}),
