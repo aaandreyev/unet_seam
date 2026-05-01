@@ -18,6 +18,26 @@ def test_one_side_only_delta_merge():
     assert torch.allclose(merged, torch.ones_like(merged))
 
 
+def test_one_side_seam_merge_applies_inner_falloff():
+    h, w = 48, 48
+    bbox = (8, 8, 40, 40)
+    mask = _bbox_mask(h, w, *bbox)
+    delta = torch.zeros(1, 3, h, w)
+    delta[:, :, 8:40, 8:24] = 1.0
+    merged, weights = merge_side_deltas(
+        {"left": delta},
+        mask,
+        bbox=bbox,
+        inner_width=16,
+        blend_falloff_px=4,
+    )
+    row = 24
+    assert float(weights["left"][0, 0, row, 8]) > 0.99
+    assert float(weights["left"][0, 0, row, 20]) > 0.99
+    assert float(weights["left"][0, 0, row, 23]) < 0.3
+    assert float(merged[0, :, row, 23].mean()) < 0.3
+
+
 def test_corner_fusion_does_not_amplify_delta():
     mask = torch.ones(1, 1, 8, 8)
     side_deltas = {
@@ -68,6 +88,60 @@ def test_seam_local_left_weight_stronger_near_bbox_left_seam():
     wl = build_seam_local_weight_map(mask, bbox, "left", inner_width=8)
     # Row 35 is the vertical midpoint — far from both y0=20 and y1=50 corners
     assert float(wl[0, 0, 35, 20]) > float(wl[0, 0, 35, 27])  # seam at x=20, decay into interior
+
+
+def test_short_blend_falloff_keeps_full_weight_until_inner_taper():
+    h, w = 64, 64
+    mask = torch.zeros(1, 1, h, w)
+    mask[:, :, 16:48, 16:48] = 1.0
+    bbox = (16, 16, 48, 48)
+    full_width = build_seam_local_weight_map(mask, bbox, "left", inner_width=16)
+    short_falloff = build_seam_local_weight_map(mask, bbox, "left", inner_width=16, blend_falloff_px=4)
+    row = 32
+    assert float(short_falloff[0, 0, row, 16]) == pytest.approx(1.0, abs=1e-6)
+    assert float(short_falloff[0, 0, row, 24]) == pytest.approx(1.0, abs=1e-6)
+    assert float(short_falloff[0, 0, row, 31]) < 0.3
+    assert float(short_falloff[0, 0, row, 24]) > float(full_width[0, 0, row, 24])
+
+
+def test_inner_falloff_plateau_is_full_then_fades_at_inner_edge():
+    """inner_falloff_px < inner_width → weight=1 from seam to (iw-falloff), then Hann to 0."""
+    h, w = 128, 256
+    iw, falloff = 96, 32
+    x0, y0, x1, y1 = 64, 16, 160, 112
+    mask = torch.zeros(1, 1, h, w)
+    mask[:, :, y0:y1, x0:x1] = 1.0
+    bbox = (x0, y0, x1, y1)
+    wmap = build_seam_local_weight_map(mask, bbox, "left", inner_width=iw, blend_falloff_px=falloff)
+    row = (y0 + y1) // 2
+    plateau_end = x0 + (iw - falloff)
+    # Plateau: every pixel from seam to plateau_end should be at max weight (1.0).
+    for x in range(x0, plateau_end):
+        assert float(wmap[0, 0, row, x]) == pytest.approx(1.0, abs=1e-5), f"x={x} should be 1.0"
+    # Taper zone: weight at 50% into the taper should be between 0 and 1.
+    x_mid_taper = plateau_end + falloff // 2
+    assert 0.0 < float(wmap[0, 0, row, x_mid_taper]) < 1.0
+    # Inner edge: weight should be 0.
+    assert float(wmap[0, 0, row, x0 + iw - 1]) < 0.05
+    # Beyond inner edge (still inside mask): weight should remain 0.
+    if x0 + iw < x1:
+        assert float(wmap[0, 0, row, x0 + iw]) == pytest.approx(0.0, abs=1e-5)
+
+
+def test_inner_falloff_zero_gives_seam_gradient():
+    """inner_falloff_px=0 → blend_falloff_px=None path → full gradient from seam (no plateau)."""
+    h, w = 64, 128
+    x0, y0, x1, y1 = 32, 8, 96, 56
+    mask = torch.zeros(1, 1, h, w)
+    mask[:, :, y0:y1, x0:x1] = 1.0
+    bbox = (x0, y0, x1, y1)
+    iw = 48
+    # inner_falloff_px=0 → pass None → fw falls back to iw → gradient from seam
+    wmap_default = build_seam_local_weight_map(mask, bbox, "left", inner_width=iw, blend_falloff_px=None)
+    row = (y0 + y1) // 2
+    # With full-range gradient, weight at seam is max and decreases monotonically.
+    assert float(wmap_default[0, 0, row, x0]) > 0.95
+    assert float(wmap_default[0, 0, row, x0 + iw // 2]) < float(wmap_default[0, 0, row, x0])
 
 
 def test_merge_seam_blends_corner_disagreement_without_amplification():

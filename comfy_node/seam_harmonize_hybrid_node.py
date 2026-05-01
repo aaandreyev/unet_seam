@@ -32,6 +32,7 @@ class SeamHarmonizerHybridNode:
                 "route_mode": (["auto", "ml", "cv", "blend"], {"default": "auto"}),
                 "region": (["inside", "outside", "both"], {"default": "inside"}),
                 "inner_width": ("INT", {"default": 128}),
+                "inner_falloff_px": ("INT", {"default": 48, "min": 0, "max": 512, "step": 1}),
                 "strength": ("FLOAT", {"default": 1.0}),
                 "strip_width": ("INT", {"default": 8, "min": 1, "max": 128, "step": 1}),
                 "blur_sigma": ("FLOAT", {"default": 20.0, "min": 0.0, "max": 200.0, "step": 1.0}),
@@ -114,6 +115,7 @@ class SeamHarmonizerHybridNode:
         route_mode,
         region,
         inner_width,
+        inner_falloff_px,
         strength,
         strip_width,
         blur_sigma,
@@ -160,6 +162,7 @@ class SeamHarmonizerHybridNode:
             "ml_eligible": bool(ml_eligible),
             "sides": sides,
             "region": region,
+            "inner_falloff_px": int(inner_falloff_px),
         }
 
         ml_rgb = None
@@ -174,6 +177,7 @@ class SeamHarmonizerHybridNode:
                 sides,
                 inner_width,
                 strength,
+                inner_falloff_px or None,
             )
             ml_rgb = self._apply_protect_mask(ml_rgb, rgb, PROTECT_MASK)
 
