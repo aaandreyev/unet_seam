@@ -27,6 +27,25 @@ def _resolve_model_path(path: str) -> Path:
     return candidates[0]
 
 
+def _filter_matching_state_dict(
+    model: torch.nn.Module,
+    state: dict[str, torch.Tensor],
+) -> tuple[dict[str, torch.Tensor], list[str], list[str]]:
+    current = model.state_dict()
+    matched: dict[str, torch.Tensor] = {}
+    dropped_unexpected: list[str] = []
+    dropped_mismatch: list[str] = []
+    for key, value in state.items():
+        if key not in current:
+            dropped_unexpected.append(key)
+            continue
+        if not isinstance(value, torch.Tensor) or current[key].shape != value.shape:
+            dropped_mismatch.append(key)
+            continue
+        matched[key] = value
+    return matched, dropped_unexpected, dropped_mismatch
+
+
 def load_model(path: str, device: str = "cpu") -> tuple[torch.nn.Module, dict]:
     key = (path, device)
     if key in _MODEL_CACHE:
@@ -47,13 +66,13 @@ def load_model(path: str, device: str = "cpu") -> tuple[torch.nn.Module, dict]:
     _validate_sidecar(sidecar)
     state = load_file(str(model_path), device=device)
     model = build_model_from_config(sidecar)
-    result = model.load_state_dict(state, strict=False)
-    if result.missing_keys or result.unexpected_keys:
-        # In production we want this visible but non-fatal: legacy exports omit
-        # attention_head, new ones include it. Print one short line for ops visibility.
+    compatible_state, dropped_unexpected, dropped_mismatch = _filter_matching_state_dict(model, state)
+    result = model.load_state_dict(compatible_state, strict=False)
+    if result.missing_keys or dropped_unexpected or dropped_mismatch:
         print(
             f"[seam_harmonizer] partial load: missing={list(result.missing_keys)[:6]} "
-            f"unexpected={list(result.unexpected_keys)[:6]}",
+            f"dropped_unexpected={dropped_unexpected[:6]} "
+            f"dropped_mismatch={dropped_mismatch[:6]}",
             flush=True,
         )
     model.eval().to(device)

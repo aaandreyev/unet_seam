@@ -13,8 +13,8 @@ model:
   channels: [32, 64, 128, 192]
   blocks: [2, 2, 4, 6]
   correction_limits:
-    gain_limit: 1.80
-    gamma_limit: 1.80
+    gain_limit: 1.20
+    gamma_limit: 1.20
     bias_limit: 0.50
     mix_limit: 0.90
     detail_limit: 0.35
@@ -29,13 +29,14 @@ loss:
     chroma: 0.7
     stats: 0.35
     lab: 0.8
-    gate: 0.02
-    field: 0.08
-    detail: 0.05
-    matrix: 0.06
+    gate: 0.03
+    field: 0.10
+    detail: 0.08
+    matrix: 0.10
     profile: 0.55
-    conf_align: 0.18
-    overcorr: 0.12
+    attn: 0.20
+    overcorr: 0.22
+    gain_reg: 0.20
 train:
   seed: 42
   lr: 2.0e-4

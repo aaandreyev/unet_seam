@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 
+from comfy_node.model_loader import _filter_matching_state_dict
 from src.models.harmonizer import SeamHarmonizerV3
 
 
@@ -55,3 +56,16 @@ def test_inference_scripts_use_strict_false():
                 if "strict=False" not in window:
                     failures.append(f"{path.name}:{lineno}: {line.strip()}")
     assert failures == [], "load_state_dict without strict=False:\n" + "\n".join(failures)
+
+
+def test_model_loader_filters_future_extra_heads_nonfatally():
+    model = SeamHarmonizerV3(channels=(8, 12, 16, 24), blocks=(1, 1, 1, 1))
+    state = model.state_dict()
+    future_state = dict(state)
+    future_state["future_head.weight"] = torch.zeros(1)
+    future_state["attention_head.0.weight"] = state["attention_head.0.weight"].clone()
+    matched, dropped_unexpected, dropped_mismatch = _filter_matching_state_dict(model, future_state)
+    assert "future_head.weight" in dropped_unexpected
+    assert "attention_head.0.weight" in matched
+    result = model.load_state_dict(matched, strict=False)
+    assert result.unexpected_keys == []

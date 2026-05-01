@@ -1,4 +1,4 @@
-checkpoint: outputs/checkpoints/last_harmonizer_55_30_04-09-33.pt
+checkpoint: outputs/checkpoints/best_harmonizer_quality_v10_1_0.5.pt
 export_root: outputs/exports
-model_name: last_harmonizer_55_30_04-09-33
+model_name: best_harmonizer_quality_v10_1_0.5
 strength_default: 1.0

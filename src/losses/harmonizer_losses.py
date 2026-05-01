@@ -157,7 +157,7 @@ class HarmonizerLossComputer:
             "profile": 0.55,
             "attn": 0.20,
             "overcorr": 0.22,
-            "gain_reg": 1.0e-8,
+            "gain_reg": 0.20,
         }
         self.weights = default_weights | (weights or {})
 

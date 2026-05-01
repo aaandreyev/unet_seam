@@ -9,8 +9,8 @@ from src.models.harmonizer_blocks import NAFBlockLite, NAFEncoderLite, resize_in
 
 
 DEFAULT_CORRECTION_LIMITS = {
-    "gain_limit": 1.80,
-    "gamma_limit": 1.80,
+    "gain_limit": 1.20,
+    "gamma_limit": 1.20,
     "bias_limit": 0.50,
     "mix_limit": 0.90,
     "detail_limit": 0.35,
