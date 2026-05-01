@@ -15,8 +15,8 @@ import torch
 from tqdm import tqdm
 
 from model_surgery.lib.checkpoint_io import free_memory, load_ema
+from model_surgery.lib.eval_mini import quality_score
 from model_surgery.lib.reporting import METRIC_COLS, RunLog, comparison_table, save_csv, save_json
-from scripts.train_harmonizer import _quality
 
 
 def _parse_eval_summary(run_dir: Path) -> dict[str, float]:
@@ -68,7 +68,7 @@ def survey(cfg: dict[str, Any], out_dir: Path, log: RunLog) -> list[dict[str, An
         eval_m = _parse_eval_summary(run_dir)
         merged_m = {**eval_m, **m}  # checkpoint metrics override eval summary
 
-        q = _quality(merged_m)
+        q = quality_score(merged_m)
         row: dict[str, Any] = {
             "name": f"{run_dir.name}/{pt_path.name}" if run_dir.is_relative_to(runs_root) else pt_path.name,
             "path": str(pt_path),

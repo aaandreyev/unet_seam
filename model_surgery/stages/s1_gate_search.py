@@ -24,7 +24,7 @@ from model_surgery.lib.checkpoint_io import (
 )
 from model_surgery.lib.eval_mini import (
     _pick_device, build_loader, build_model,
-    cache_coarse_outputs, eval_from_cache,
+    cache_coarse_outputs, eval_from_cache, eval_with_preloaded,
     preload_batches, metrics_summary, quality_score,
 )
 from model_surgery.lib.reporting import RunLog, save_json
@@ -149,17 +149,28 @@ def gate_search(
     save_json(all_results[:200], out_dir / "s1_gate_search.json")
 
     if best_result and best_limits:
-        # Re-load and save checkpoint with best limits baked into meta
+        # Full re-eval of best candidate with CIEDE2000 (fast search used proxy metrics)
+        print("[S1] Full re-eval of best candidate (with CIEDE2000)...", flush=True)
         ema_state, best_meta = load_ema(Path(best_result["base_path"]))
+        best_model = build_model(ema_state, best_meta, device)
+        best_model.correction_limits.update(best_limits)
+        full_metrics = eval_with_preloaded(best_model, preloaded, outer_width)
+        full_q = quality_score(full_metrics)
+        del best_model
+        free_memory()
+        print(f"[S1] Full Q={full_q:.3f}  {metrics_summary(full_metrics)}")
+
+        # Bake best limits into meta and save
         cl = best_meta.setdefault("config", {}).setdefault("model", {}).setdefault("correction_limits", {})
         cl.update(best_limits)
         save_surgery_checkpoint(ema_state, best_meta, out_dir / "s1_best.pt")
         del ema_state
         free_memory()
-        log.log("gate_search_done", best_quality=best_q, best=best_result, best_limits=best_limits)
+        log.log("gate_search_done", best_quality=full_q, proxy_quality=best_q,
+                best=best_result, best_limits=best_limits, full_metrics=full_metrics)
         print(f"\n[S1] Best: {best_result['base']} "
               f"gate_delta={best_result['gate_bias_delta']:.3f} "
               f"gain={best_limits['gain_limit']:.2f} "
-              f"detail={best_limits['detail_limit']:.2f}  Q={best_q:.3f}")
+              f"detail={best_limits['detail_limit']:.2f}  Q(full)={full_q:.3f}")
 
     return all_results

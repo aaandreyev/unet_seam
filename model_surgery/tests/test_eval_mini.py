@@ -5,7 +5,8 @@ import pytest
 import torch
 
 from model_surgery.lib.eval_mini import (
-    build_model, cache_coarse_outputs, eval_from_cache, metrics_summary, quality_score,
+    _infer_channels_blocks, build_model, cache_coarse_outputs,
+    eval_from_cache, metrics_summary, quality_score,
 )
 from src.models.harmonizer import DEFAULT_CORRECTION_LIMITS, SeamHarmonizerV3
 
@@ -133,6 +134,42 @@ def test_metrics_summary_handles_missing_keys():
     s = metrics_summary({})
     assert "Q=" in s
     assert "nan" in s.lower() or "nan" not in s  # just shouldn't crash
+
+
+def test_quality_score_no_nan_when_ciede2000_missing():
+    """Missing CIEDE2000 must not produce nan (inf/inf case)."""
+    m = {"boundary_mae_16": 0.02, "baseline_boundary_mae_16": 0.04,
+         "lowfreq_mae": 0.015, "confidence_mean": 0.25}
+    q = quality_score(m)
+    assert q == q, "quality_score must not be nan when CIEDE2000 is absent"
+    assert q != float("inf"), "quality_score must not be inf"
+
+
+def test_quality_score_no_nan_empty():
+    q = quality_score({})
+    assert q == q, "quality_score({}) must not be nan"
+
+
+# --- architecture inference ---
+
+def test_infer_channels_blocks_from_state_dict(tiny_state):
+    ch, bl = _infer_channels_blocks(tiny_state)
+    assert ch == (8, 12, 16, 24)
+    assert len(bl) == 4
+    assert all(b >= 1 for b in bl)
+
+
+def test_build_model_with_wrong_meta_channels_falls_back(tiny_state):
+    """build_model must recover from size mismatch by inferring architecture."""
+    meta_wrong = {
+        "config": {
+            "model": {"channels": [32, 64, 128, 192], "blocks": [2, 2, 4, 6]},
+            "dataset": {"outer_width": 128, "boundary_band_px": 24},
+        }
+    }
+    # tiny_state has channels=(8,12,16,24) but meta says (32,64,128,192) → size mismatch
+    model = build_model(tiny_state, meta_wrong, torch.device("cpu"))
+    assert model.channels == (8, 12, 16, 24)
 
 
 # --- cache_coarse_outputs + eval_from_cache ---

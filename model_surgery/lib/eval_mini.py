@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, Subset
 from src.data.strip_geometry import StripSpec
 from src.data.synthetic_strip_dataset import SyntheticStripDataset, collate_strip_batch
 from src.losses.harmonizer_losses import HarmonizerLossComputer
-from src.metrics.harmonizer_metrics import evaluate_harmonizer_batch
+from src.metrics.harmonizer_metrics import evaluate_harmonizer_batch, evaluate_harmonizer_batch_fast
 from src.models.harmonizer import SeamHarmonizerV3
 
 from model_surgery.lib.checkpoint_io import free_memory
@@ -28,21 +28,64 @@ def _pick_device() -> torch.device:
     return torch.device("cpu")
 
 
+def _infer_channels_blocks(
+    state_dict: dict[str, torch.Tensor],
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Infer (channels, blocks) from state_dict key shapes.
+
+    Reads encoder.stages.{level}.{block}.norm1.weight — works for NAFEncoderLite.
+    Falls back to empty tuples if the expected keys are absent.
+    """
+    channels: list[int] = []
+    blocks: list[int] = []
+    for level in range(10):
+        k = f"encoder.stages.{level}.0.norm1.weight"
+        if k not in state_dict:
+            break
+        channels.append(int(state_dict[k].shape[0]))
+        n = 1
+        while f"encoder.stages.{level}.{n}.norm1.weight" in state_dict:
+            n += 1
+        blocks.append(n)
+    return tuple(channels), tuple(blocks)
+
+
 def build_model(state_dict: dict[str, torch.Tensor], meta: dict[str, Any],
                 device: torch.device) -> SeamHarmonizerV3:
     cfg = meta.get("config") or {}
     mcfg = cfg.get("model") or {}
     dcfg = cfg.get("dataset") or {}
     correction_limits = mcfg.get("correction_limits")
-    model = SeamHarmonizerV3(
-        in_channels=int(mcfg.get("in_channels", 9)),
-        channels=tuple(mcfg.get("channels", [32, 64, 128, 192])),
-        blocks=tuple(mcfg.get("blocks", [2, 2, 4, 6])),
-        outer_width=int(dcfg.get("outer_width", 128)),
-        boundary_band_px=int(dcfg.get("boundary_band_px", 24)),
-        correction_limits=correction_limits,
-    ).to(device)
-    result = model.load_state_dict(state_dict, strict=False)
+    in_channels   = int(mcfg.get("in_channels", 9))
+    channels      = tuple(mcfg.get("channels", [32, 64, 128, 192]))
+    blocks        = tuple(mcfg.get("blocks", [2, 2, 4, 6]))
+    outer_width   = int(dcfg.get("outer_width", 128))
+    boundary_band = int(dcfg.get("boundary_band_px", 24))
+
+    def _make(ch, bl):
+        return SeamHarmonizerV3(
+            in_channels=in_channels, channels=ch, blocks=bl,
+            outer_width=outer_width, boundary_band_px=boundary_band,
+            correction_limits=correction_limits,
+        ).to(device)
+
+    try:
+        model = _make(channels, blocks)
+        result = model.load_state_dict(state_dict, strict=False)
+    except RuntimeError as e:
+        if "size mismatch" not in str(e):
+            raise
+        # Infer architecture from state_dict and retry
+        inf_ch, inf_bl = _infer_channels_blocks(state_dict)
+        if not inf_ch:
+            raise RuntimeError(
+                f"Cannot infer architecture from state_dict (size mismatch): {e}"
+            ) from e
+        print(f"[build_model] size mismatch with meta channels={channels} — "
+              f"inferred channels={inf_ch}, blocks={inf_bl}")
+        model = _make(inf_ch, inf_bl)
+        result = model.load_state_dict(state_dict, strict=False)
+
     if result.unexpected_keys:
         raise RuntimeError(f"Unexpected keys in state_dict: {result.unexpected_keys[:5]}")
     model.eval()
@@ -119,26 +162,24 @@ def cache_coarse_outputs(
       gain_lowres, gamma_lowres, bias_lowres, mix_lowres, detail_lowres, gate_lowres,
       attention_lowres, x_rgb (input strip RGB), input_rgb, target
     """
-    from src.models.harmonizer import SeamHarmonizerV3 as _H
     cached: list[dict] = []
     with torch.inference_mode():
         for batch in batches:
             x = batch["input"]
-            # Run full forward to get coarse outputs
             out = model(x)
             cached.append({
                 # Raw coarse outputs (small tensors, cheap to store)
-                "gain_lowres":     out["gain_lowres"].clone(),
-                "gamma_lowres":    out["gamma_lowres"].clone(),
-                "bias_lowres":     out["bias_lowres"].clone(),
-                "mix_lowres":      out["mix_lowres"].clone(),
-                "detail_lowres":   out["detail_lowres"].clone(),
-                "gate_lowres":     out["gate_lowres"].clone(),
-                "attention_lowres":out["attention_lowres"].clone(),
+                "gain_lowres":      out["gain_lowres"].clone(),
+                "gamma_lowres":     out["gamma_lowres"].clone(),
+                "bias_lowres":      out["bias_lowres"].clone(),
+                "mix_lowres":       out["mix_lowres"].clone(),
+                "detail_lowres":    out["detail_lowres"].clone(),
+                "gate_lowres":      out["gate_lowres"].clone(),
+                "attention_lowres": out["attention_lowres"].clone(),
                 # Full-res data needed for metrics
-                "x_rgb":      x[:, :3].clone(),
-                "input_rgb":  batch["input_rgb"],
-                "target":     batch["target"],
+                "x_rgb":     x[:, :3].clone(),
+                "input_rgb": batch["input_rgb"],
+                "target":    batch["target"],
             })
     return cached
 
@@ -150,12 +191,11 @@ def eval_from_cache(
 ) -> dict[str, float]:
     """Eval using cached coarse outputs — runs only reconstruction, no encoder/decoder.
 
-    Call cache_coarse_outputs() first to build the cache.
-    correction_limits must include all keys accepted by reconstruct_corrected_strip:
-      gain_limit, gamma_limit, bias_limit, mix_limit, detail_limit, gate_bias.
+    Uses evaluate_harmonizer_batch_fast (pure-torch, no CIEDE2000) so everything
+    stays on the accelerator device.  Use quality_score() for ranking — it handles
+    the absent boundary_ciede2000_16 gracefully.
 
-    Speedup for S1 vs eval_with_preloaded: ~100-1000× — reconstruction only,
-    no encoder/decoder forward.
+    Call cache_coarse_outputs() first to build the cache.
     """
     from src.models.harmonizer import reconstruct_corrected_strip
     agg: dict[str, float] = {}
@@ -174,7 +214,7 @@ def eval_from_cache(
                 entry["x_rgb"], lowres, outer_width=outer_width, **correction_limits
             )
             out_for_metrics = {**recon, "attention_lowres": entry["attention_lowres"]}
-            m = evaluate_harmonizer_batch(
+            m = evaluate_harmonizer_batch_fast(
                 recon["corrected_strip"], entry["input_rgb"], entry["target"],
                 out_for_metrics, outer_width=outer_width,
             )
@@ -216,7 +256,7 @@ def eval_with_preloaded(
     """Eval on pre-loaded device batches — zero H→D transfer cost.
 
     Use inside tight loops where the same dataset is evaluated many times
-    (S1 gate search, S2 ablation inner loop).
+    (S2 ablation inner loop).
     """
     agg: dict[str, float] = {}
     steps = 0
@@ -253,19 +293,26 @@ def run_eval(
 def quality_score(metrics: dict[str, float]) -> float:
     """Surgery-safe quality score.
 
-    _quality() from train_harmonizer uses 1.0 as default for missing metrics like
-    overcorrection_mae, delta_luma_profile_mae, delta_chroma_profile_mae — this
-    massively penalises older checkpoints that weren't evaluated for those metrics.
-    Surgery needs consistent relative ranking, so we substitute 0.0 for missing
-    penalty-only metrics (no penalty when unknown, rather than maximum penalty).
+    _quality() from train_harmonizer uses 1.0 as default for missing penalty metrics
+    and float("inf") for missing CIEDE2000 — leading to inf/inf=nan when both
+    boundary_ciede2000_16 and its baseline are absent (e.g. older checkpoints,
+    fast-eval cache path that skips CIEDE2000).
+
+    Surgery needs consistent relative ranking, so:
+    - Penalty-only terms (overcorrection_mae etc.) → 0.0 when missing (no false penalty)
+    - CIEDE2000 terms → 0.0 when missing (neutralise; ranking driven by MAE terms)
     """
     from scripts.train_harmonizer import _quality
     safe = dict(metrics)
-    # These terms scale linearly and default to 1.0 in _quality() — use 0 when missing.
     for key in ("overcorrection_mae", "delta_luma_profile_mae", "delta_chroma_profile_mae",
                 "confidence_alignment_mae"):
         if key not in safe:
             safe[key] = 0.0
+    # Avoid inf/inf = nan: neutralise CIEDE2000 terms when absent.
+    # When present (full eval), they contribute normally.
+    if "boundary_ciede2000_16" not in safe:
+        safe["boundary_ciede2000_16"] = 0.0
+        safe.setdefault("baseline_boundary_ciede2000_16", 0.0)
     return _quality(safe)
 
 
