@@ -35,8 +35,9 @@ from model_surgery.lib.checkpoint_io import (
     transplant_head,
 )
 from model_surgery.lib.eval_mini import (
-    _pick_device, build_loader, build_model, cache_coarse_outputs, eval_from_cache,
-    metrics_summary, preload_batches, quality_score, run_eval, run_eval_on_preloaded,
+    ReusableModelEvaluator, _pick_device, build_loader, build_model, cache_coarse_outputs,
+    eval_from_cache, metrics_summary, preload_batches, quality_score, run_eval,
+    run_eval_on_preloaded,
 )
 from model_surgery.lib.reporting import RunLog, save_json
 
@@ -172,6 +173,8 @@ def cycle_loop(
     max_cycles = s_cfg["max_cycles"]
     patience = s_cfg["patience"]
     top_k_base = s_cfg["top_k_base"]
+    use_fast_proxy = bool(s_cfg.get("use_fast_proxy", True))
+    rerank_top_k = int(s_cfg.get("rerank_top_k", 8))
     mat_dir = _mat_dir(eval_cfg)
 
     loader = build_loader(
@@ -196,6 +199,7 @@ def cycle_loop(
     )
     device = _pick_device()
     preloaded = preload_batches(loader, device)
+    evaluator = ReusableModelEvaluator(preloaded, device, outer_width=eval_cfg["outer_width"])
 
     # Load initial pool (top_k_base checkpoints)
     pool_entries: list[tuple[dict, dict, str]] = []
@@ -214,9 +218,7 @@ def cycle_loop(
         pt_path = out_dir / pt_name
         if pt_path.exists():
             st, me = load_ema(pt_path)
-            m = run_eval_on_preloaded(
-                st, me, preloaded, device=device, outer_width=eval_cfg["outer_width"]
-            )
+            m = evaluator.evaluate(st, me, fast=False)
             q = quality_score(m)
             if q < current_q:
                 del current_state
@@ -263,6 +265,25 @@ def cycle_loop(
         cycle_best_state: dict | None = None
         cycle_best_meta: dict | None = None
         cycle_best_label: str | None = None
+        rerank_pool: list[dict[str, Any]] = []
+
+        def _remember_candidate(proxy_q: float, label: str, state: dict | None, meta: dict, owns_state: bool) -> bool:
+            rerank_pool.append({
+                "proxy_quality": proxy_q,
+                "label": label,
+                "state": state,
+                "meta": meta,
+                "owns_state": owns_state,
+            })
+            rerank_pool.sort(key=lambda item: item["proxy_quality"])
+            kept = True
+            while len(rerank_pool) > max(1, rerank_top_k):
+                evicted = rerank_pool.pop()
+                if evicted["state"] is state and evicted["label"] == label:
+                    kept = False
+                elif evicted["owns_state"] and evicted["state"] is not None:
+                    del evicted["state"]
+            return kept
 
         op_bar = tqdm(_iter_operations(current_state, current_meta, pool_entries), total=total_ops,
                       desc=f"  cycle {cycle_idx+1} ops", leave=False,
@@ -273,26 +294,23 @@ def cycle_loop(
                 if not owns_state:
                     limits = cand_meta.get("config", {}).get("model", {}).get("correction_limits", {})
                     m = eval_from_cache(cycle_cached, limits, outer_width=eval_cfg["outer_width"])
+                    q = quality_score(m)
+                    _remember_candidate(q, label, None, cand_meta, False)
                 else:
                     assert cand_state is not None
-                    m = run_eval_on_preloaded(
-                        cand_state, cand_meta, preloaded, device=device, outer_width=eval_cfg["outer_width"]
-                    )
+                    if use_fast_proxy:
+                        m = evaluator.evaluate(cand_state, cand_meta, fast=True)
+                    else:
+                        m = evaluator.evaluate(cand_state, cand_meta, fast=False)
+                    q = quality_score(m)
+                    kept = _remember_candidate(q, label, cand_state, cand_meta, True)
+                    if not kept:
+                        del cand_state
                 q = quality_score(m)
                 if q < cycle_best_q:
                     cycle_best_q = q
-                    # Free previous cycle_best_state only if we own it
-                    if cycle_best_state is not None:
-                        del cycle_best_state
-                        free_memory()
-                    # Take ownership: clone if we don't own it (shared ref), keep if we do
-                    cycle_best_state = clone_state(current_state) if not owns_state else cand_state
-                    cycle_best_meta = cand_meta
                     cycle_best_label = label
-                    op_bar.set_postfix_str(f"NEW_BEST Q={q:.3f} {label[:40]}")
-                elif owns_state:
-                    del cand_state
-                # Never del shared-ref states (owns_state=False)
+                    op_bar.set_postfix_str(f"BEST_PROXY Q={q:.3f} {label[:40]}")
                 free_memory()
             except Exception:
                 if owns_state:
@@ -302,6 +320,29 @@ def cycle_loop(
         op_bar.close()
         del cycle_cached
         free_memory()
+
+        cycle_best_q = current_q
+        cycle_best_state = None
+        cycle_best_meta = None
+        cycle_best_label = None
+        for candidate in rerank_pool:
+            cand_meta = candidate["meta"]
+            owns_state = candidate["owns_state"]
+            cand_state = candidate["state"] if owns_state else current_state
+            assert cand_state is not None
+            full_metrics = evaluator.evaluate(cand_state, cand_meta, fast=False)
+            full_q = quality_score(full_metrics)
+            if full_q < cycle_best_q:
+                if cycle_best_state is not None and cycle_best_state is not cand_state:
+                    del cycle_best_state
+                    free_memory()
+                cycle_best_q = full_q
+                cycle_best_state = clone_state(current_state) if not owns_state else cand_state
+                cycle_best_meta = cand_meta
+                cycle_best_label = candidate["label"]
+            elif owns_state and cand_state is not cycle_best_state:
+                del cand_state
+            free_memory()
 
         if cycle_best_state is not None and cycle_best_q < current_q:
             improvement = current_q - cycle_best_q
@@ -342,9 +383,7 @@ def cycle_loop(
             ft_result = _run_finetune(current_state, current_meta, cfg, out_dir, log)
             if ft_result is not None:
                 ft_state, ft_meta = ft_result
-                ft_m = run_eval_on_preloaded(
-                    ft_state, ft_meta, preloaded, device=device, outer_width=eval_cfg["outer_width"]
-                )
+                ft_m = evaluator.evaluate(ft_state, ft_meta, fast=False)
                 ft_q = quality_score(ft_m)
                 if ft_q < current_q:
                     del current_state
@@ -384,6 +423,7 @@ def cycle_loop(
     for st, me, _ in pool_entries:
         del st, me
     del current_state
+    evaluator.close()
     free_memory()
 
     log.log("cycle_loop_done", final_quality=full_q, cycles=len(history))

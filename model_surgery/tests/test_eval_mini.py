@@ -5,8 +5,9 @@ import pytest
 import torch
 
 from model_surgery.lib.eval_mini import (
-    _infer_channels_blocks, build_model, cache_coarse_outputs,
-    eval_from_cache, metrics_summary, quality_score,
+    ReusableModelEvaluator, _infer_channels_blocks, build_model,
+    cache_coarse_outputs, eval_from_cache, eval_with_preloaded_fast,
+    metrics_summary, quality_score,
 )
 from src.models.harmonizer import DEFAULT_CORRECTION_LIMITS, SeamHarmonizerV3
 
@@ -219,6 +220,27 @@ def test_eval_from_cache_varies_with_limits(tiny_state, dummy_meta):
     mb = eval_from_cache(cached, limits_b, outer_width=128)
     # Heavy negative gate_bias suppresses confidence → different correction → different metrics
     assert ma != mb
+
+
+def test_eval_with_preloaded_fast_returns_metrics(tiny_state, dummy_meta):
+    model = build_model(tiny_state, dummy_meta, torch.device("cpu"))
+    batches = [_make_batch(), _make_batch()]
+    metrics = eval_with_preloaded_fast(model, batches, outer_width=128)
+    assert "boundary_mae_16" in metrics
+    assert "lowfreq_mae" in metrics
+    assert "boundary_ciede2000_16" not in metrics
+
+
+def test_reusable_model_evaluator_reuses_shell_and_supports_fast_and_full(tiny_state, dummy_meta):
+    batches = [_make_batch(), _make_batch()]
+    evaluator = ReusableModelEvaluator(batches, torch.device("cpu"), outer_width=128)
+    fast_metrics = evaluator.evaluate(tiny_state, dummy_meta, fast=True)
+    full_metrics = evaluator.evaluate(tiny_state, dummy_meta, fast=False)
+    assert "boundary_mae_16" in fast_metrics
+    assert "boundary_ciede2000_16" not in fast_metrics
+    assert "boundary_ciede2000_16" in full_metrics
+    assert len(evaluator._models) == 1
+    evaluator.close()
 
 
 def test_cache_coarse_does_not_require_model_after(tiny_state, dummy_meta):

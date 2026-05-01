@@ -20,8 +20,8 @@ from model_surgery.lib.checkpoint_io import (
     save_surgery_checkpoint, selective_head_merge, slerp_merge, HEAD_SLICES,
 )
 from model_surgery.lib.eval_mini import (
-    _pick_device, build_loader, metrics_summary, preload_batches,
-    quality_score, run_eval_on_preloaded,
+    ReusableModelEvaluator, _pick_device, build_loader, metrics_summary,
+    preload_batches, quality_score,
 )
 from model_surgery.lib.reporting import RunLog, save_json
 
@@ -37,6 +37,8 @@ def merge(
     eval_cfg = cfg["eval"]
     alphas = s_cfg["alphas"]
     sel_heads = s_cfg["selective_heads"]
+    use_fast_proxy = bool(s_cfg.get("use_fast_proxy", True))
+    rerank_top_k = int(s_cfg.get("rerank_top_k", 12))
     candidates = survey_rows[:top_k]
 
     mat_dir = Path(eval_cfg["materialized_dir"]) if eval_cfg.get("materialized_dir") else None
@@ -52,6 +54,7 @@ def merge(
     )
     device = _pick_device()
     preloaded = preload_batches(loader, device)
+    evaluator = ReusableModelEvaluator(preloaded, device, outer_width=eval_cfg["outer_width"])
 
     pairs = [(i, j) for i, j in itertools.combinations(range(len(candidates)), 2)]
     n_linear = len(pairs) * len(alphas)
@@ -65,7 +68,7 @@ def merge(
           f"({len(alphas)} linear + {len(alphas)} slerp + {len(sel_heads)}heads×{len(alphas)}) "
           f"= {total} evals")
 
-    all_results: list[dict[str, Any]] = []
+    proxy_results: list[dict[str, Any]] = []
     best_q = float("inf")
     best_state: dict | None = None
     best_meta: dict | None = None
@@ -95,21 +98,16 @@ def merge(
             ]:
                 try:
                     merged = merge_fn(state_a, state_b, alpha)
-                    m = run_eval_on_preloaded(
-                        merged, meta_a, preloaded, device=device, outer_width=eval_cfg["outer_width"]
-                    )
+                    m = evaluator.evaluate(merged, meta_a, fast=use_fast_proxy)
                     q = quality_score(m)
                     result = {"type": merge_type, "a": name_a, "b": name_b,
-                              "alpha": alpha, "quality": q, **m}
-                    all_results.append(result)
+                              "alpha": alpha, "quality": q, "proxy": use_fast_proxy, **m}
+                    proxy_results.append(result)
+                    del merged
                     if q < best_q:
                         best_q = q
-                        best_state = merged
-                        best_meta = meta_a
                         best_result = result
-                        pbar.set_postfix_str(f"BEST {merge_type} α={alpha:.2f} {metrics_summary(m)}")
-                    else:
-                        del merged
+                        pbar.set_postfix_str(f"BEST_PROXY {merge_type} α={alpha:.2f} {metrics_summary(m)}")
                     free_memory()
                 except Exception:
                     pass
@@ -119,27 +117,54 @@ def merge(
             for head in sel_heads:
                 try:
                     merged = selective_head_merge(state_a, state_b, head, alpha)
-                    m = run_eval_on_preloaded(
-                        merged, meta_a, preloaded, device=device, outer_width=eval_cfg["outer_width"]
-                    )
+                    m = evaluator.evaluate(merged, meta_a, fast=use_fast_proxy)
                     q = quality_score(m)
                     result = {"type": f"head_blend_{head}", "a": name_a, "b": name_b,
-                              "alpha": alpha, "head": head, "quality": q, **m}
-                    all_results.append(result)
+                              "alpha": alpha, "head": head, "quality": q, "proxy": use_fast_proxy, **m}
+                    proxy_results.append(result)
+                    del merged
                     if q < best_q:
                         best_q = q
-                        best_state = merged
-                        best_meta = meta_a
                         best_result = result
-                        pbar.set_postfix_str(f"BEST head={head} α={alpha:.2f} {metrics_summary(m)}")
-                    else:
-                        del merged
+                        pbar.set_postfix_str(f"BEST_PROXY head={head} α={alpha:.2f} {metrics_summary(m)}")
                     free_memory()
                 except Exception:
                     pass
                 pbar.update(1)
 
+    rerank_candidates = sorted(proxy_results, key=lambda r: r.get("quality", float("inf")))[: max(1, rerank_top_k)]
+    all_results: list[dict[str, Any]] = []
+    best_q = float("inf")
+    best_result = None
+
+    for candidate in rerank_candidates:
+        row_a = next(r for r in candidates if r["name"] == candidate["a"])
+        row_b = next(r for r in candidates if r["name"] == candidate["b"])
+        state_a, meta_a = _load(row_a["path"])
+        state_b, _ = _load(row_b["path"])
+        if candidate["type"] == "linear":
+            merged = linear_merge(state_a, state_b, candidate["alpha"])
+        elif candidate["type"] == "slerp":
+            merged = slerp_merge(state_a, state_b, candidate["alpha"])
+        else:
+            merged = selective_head_merge(state_a, state_b, candidate["head"], candidate["alpha"])
+        m = evaluator.evaluate(merged, meta_a, fast=False)
+        q = quality_score(m)
+        full_result = {**candidate, "proxy_quality": candidate["quality"], "quality": q, "proxy": False, **m}
+        all_results.append(full_result)
+        if q < best_q:
+            if best_state is not None:
+                del best_state
+            best_q = q
+            best_state = merged
+            best_meta = meta_a
+            best_result = full_result
+        else:
+            del merged
+        free_memory()
+
     # Free cache
+    evaluator.close()
     for state, meta in _cache.values():
         del state, meta
     _cache.clear()
@@ -147,7 +172,10 @@ def merge(
     pbar.close()
 
     all_results.sort(key=lambda r: r.get("quality", float("inf")))
-    save_json(all_results[:300], out_dir / "s3_merge.json")
+    save_json({
+        "proxy_top": sorted(proxy_results, key=lambda r: r.get("quality", float("inf")))[:300],
+        "reranked": all_results,
+    }, out_dir / "s3_merge.json")
 
     if best_state is not None and best_meta is not None:
         save_surgery_checkpoint(best_state, best_meta, out_dir / "s3_best.pt")

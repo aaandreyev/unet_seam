@@ -65,6 +65,8 @@ s3_merge:
     - gate
     - detail
     - bias
+  use_fast_proxy: true
+  rerank_top_k: 12
 
 s4_surgery:
   heads_to_transplant:
@@ -73,11 +75,15 @@ s4_surgery:
     - detail
     - bias
     - mix
+  use_fast_proxy: true
+  rerank_top_k: 12
 
 s5_cycle:
   max_cycles: 40
   patience: 8             # stop if no improvement for N cycles
   top_k_base: 3           # how many best checkpoints to use as cycle bases
+  use_fast_proxy: true
+  rerank_top_k: 8
   finetune_on_plateau:
     enabled: true
     plateau_cycles: 5

@@ -21,8 +21,8 @@ from model_surgery.lib.checkpoint_io import (
     free_memory, load_ema, save_surgery_checkpoint, transplant_head, HEAD_SLICES,
 )
 from model_surgery.lib.eval_mini import (
-    _pick_device, build_loader, metrics_summary, preload_batches,
-    quality_score, run_eval_on_preloaded,
+    ReusableModelEvaluator, _pick_device, build_loader, metrics_summary,
+    preload_batches, quality_score,
 )
 from model_surgery.lib.reporting import RunLog, save_json
 
@@ -38,6 +38,8 @@ def surgery(
     s_cfg = cfg["s4_surgery"]
     eval_cfg = cfg["eval"]
     heads = s_cfg["heads_to_transplant"]
+    use_fast_proxy = bool(s_cfg.get("use_fast_proxy", True))
+    rerank_top_k = int(s_cfg.get("rerank_top_k", 12))
     bases = survey_rows[:top_k_base]
     donors = survey_rows[:top_k_donors]
 
@@ -54,6 +56,7 @@ def surgery(
     )
     device = _pick_device()
     preloaded = preload_batches(loader, device)
+    evaluator = ReusableModelEvaluator(preloaded, device, outer_width=eval_cfg["outer_width"])
 
     combos = [
         (b, d, h)
@@ -66,7 +69,7 @@ def surgery(
     print(f"\n[S4] Surgery: {len(bases)} bases × {len(donors)} donors × {len(heads)} heads "
           f"= {total} transplants")
 
-    all_results: list[dict[str, Any]] = []
+    proxy_results: list[dict[str, Any]] = []
     best_q = float("inf")
     best_state: dict | None = None
     best_meta: dict | None = None
@@ -89,34 +92,56 @@ def surgery(
 
         try:
             new_state = transplant_head(base_state, donor_state, head)
-            m = run_eval_on_preloaded(
-                new_state, base_meta, preloaded, device=device, outer_width=eval_cfg["outer_width"]
-            )
+            m = evaluator.evaluate(new_state, base_meta, fast=use_fast_proxy)
             q = quality_score(m)
             result = {
                 "base": base_row["name"], "donor": donor_row["name"],
                 "head": head, "quality": q,
                 "base_quality": base_row.get("quality_score"),
                 "donor_quality": donor_row.get("quality_score"),
-                **m,
+                "proxy": use_fast_proxy, **m,
             }
-            all_results.append(result)
+            proxy_results.append(result)
+            del new_state
             if q < best_q:
                 best_q = q
-                best_state = new_state
-                best_meta = base_meta
                 best_result = result
                 pbar.set_postfix_str(
-                    f"BEST head={head} base={base_row['name'][:20]} "
+                    f"BEST_PROXY head={head} base={base_row['name'][:20]} "
                     f"donor={donor_row['name'][:20]} {metrics_summary(m)}"
                 )
-            else:
-                del new_state
             free_memory()
         except Exception as e:
             pass
         pbar.update(1)
 
+    rerank_candidates = sorted(proxy_results, key=lambda r: r.get("quality", float("inf")))[: max(1, rerank_top_k)]
+    all_results: list[dict[str, Any]] = []
+    best_q = float("inf")
+    best_result = None
+
+    for candidate in rerank_candidates:
+        base_row = next(r for r in bases if r["name"] == candidate["base"])
+        donor_row = next(r for r in donors if r["name"] == candidate["donor"])
+        base_state, base_meta = _load(base_row["path"])
+        donor_state, _ = _load(donor_row["path"])
+        new_state = transplant_head(base_state, donor_state, candidate["head"])
+        m = evaluator.evaluate(new_state, base_meta, fast=False)
+        q = quality_score(m)
+        full_result = {**candidate, "proxy_quality": candidate["quality"], "quality": q, "proxy": False, **m}
+        all_results.append(full_result)
+        if q < best_q:
+            if best_state is not None:
+                del best_state
+            best_q = q
+            best_state = new_state
+            best_meta = base_meta
+            best_result = full_result
+        else:
+            del new_state
+        free_memory()
+
+    evaluator.close()
     for state, meta in _cache.values():
         del state, meta
     _cache.clear()
@@ -124,7 +149,10 @@ def surgery(
     pbar.close()
 
     all_results.sort(key=lambda r: r.get("quality", float("inf")))
-    save_json(all_results[:400], out_dir / "s4_surgery.json")
+    save_json({
+        "proxy_top": sorted(proxy_results, key=lambda r: r.get("quality", float("inf")))[:400],
+        "reranked": all_results,
+    }, out_dir / "s4_surgery.json")
 
     if best_state is not None and best_meta is not None:
         save_surgery_checkpoint(best_state, best_meta, out_dir / "s4_best.pt")

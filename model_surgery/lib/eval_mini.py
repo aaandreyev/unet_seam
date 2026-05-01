@@ -5,8 +5,8 @@ On M1 MPS ~10s for 60 strips with batch_size=4.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -16,7 +16,7 @@ from src.data.strip_geometry import StripSpec
 from src.data.synthetic_strip_dataset import SyntheticStripDataset, collate_strip_batch
 from src.losses.harmonizer_losses import HarmonizerLossComputer
 from src.metrics.harmonizer_metrics import evaluate_harmonizer_batch, evaluate_harmonizer_batch_fast
-from src.models.harmonizer import SeamHarmonizerV3
+from src.models.harmonizer import DEFAULT_CORRECTION_LIMITS, SeamHarmonizerV3
 
 from model_surgery.lib.checkpoint_io import free_memory
 
@@ -33,6 +33,12 @@ def _autocast_context(device: torch.device):
     if device.type == "cuda":
         return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     return nullcontext()
+
+
+def _optimize_runtime(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")
 
 
 def _infer_channels_blocks(
@@ -59,6 +65,7 @@ def _infer_channels_blocks(
 
 def build_model(state_dict: dict[str, torch.Tensor], meta: dict[str, Any],
                 device: torch.device) -> SeamHarmonizerV3:
+    _optimize_runtime(device)
     cfg = meta.get("config") or {}
     mcfg = cfg.get("model") or {}
     dcfg = cfg.get("dataset") or {}
@@ -95,6 +102,42 @@ def build_model(state_dict: dict[str, torch.Tensor], meta: dict[str, Any],
 
     if result.unexpected_keys:
         raise RuntimeError(f"Unexpected keys in state_dict: {result.unexpected_keys[:5]}")
+    if device.type == "cuda":
+        model = model.to(memory_format=torch.channels_last)
+    model.eval()
+    return model
+
+
+def _model_signature(state_dict: dict[str, torch.Tensor], meta: dict[str, Any]) -> tuple:
+    cfg = meta.get("config") or {}
+    mcfg = cfg.get("model") or {}
+    dcfg = cfg.get("dataset") or {}
+    in_channels = int(mcfg.get("in_channels", 9))
+    channels = tuple(mcfg.get("channels", [32, 64, 128, 192]))
+    blocks = tuple(mcfg.get("blocks", [2, 2, 4, 6]))
+    outer_width = int(dcfg.get("outer_width", 128))
+    boundary_band = int(dcfg.get("boundary_band_px", 24))
+    if "encoder.stages.0.0.norm1.weight" in state_dict:
+        inferred_channels, inferred_blocks = _infer_channels_blocks(state_dict)
+        if inferred_channels:
+            channels, blocks = inferred_channels, inferred_blocks
+    return in_channels, channels, blocks, outer_width, boundary_band
+
+
+def _build_model_from_signature(
+    signature: tuple,
+    correction_limits: dict[str, float] | None,
+    device: torch.device,
+) -> SeamHarmonizerV3:
+    in_channels, channels, blocks, outer_width, boundary_band = signature
+    model = SeamHarmonizerV3(
+        in_channels=in_channels,
+        channels=channels,
+        blocks=blocks,
+        outer_width=outer_width,
+        boundary_band_px=boundary_band,
+        correction_limits=correction_limits,
+    ).to(device)
     if device.type == "cuda":
         model = model.to(memory_format=torch.channels_last)
     model.eval()
@@ -300,6 +343,74 @@ def eval_with_preloaded(
                     agg[k] = agg.get(k, 0.0) + float(v)
                 steps += 1
     return {k: v / steps for k, v in agg.items()} if steps > 0 else {}
+
+
+def eval_with_preloaded_fast(
+    model: SeamHarmonizerV3,
+    batches: list[dict],
+    outer_width: int = 128,
+) -> dict[str, float]:
+    """Fast eval on pre-loaded batches without CPU-side CIEDE2000."""
+    agg: dict[str, float] = {}
+    steps = 0
+    with torch.inference_mode():
+        with _autocast_context(next(model.parameters()).device):
+            for batch in batches:
+                out = model(batch["input"])
+                m = evaluate_harmonizer_batch_fast(
+                    out["corrected_strip"], batch["input_rgb"], batch["target"], out,
+                    outer_width=outer_width,
+                )
+                for k, v in m.items():
+                    agg[k] = agg.get(k, 0.0) + float(v)
+                steps += 1
+    return {k: v / steps for k, v in agg.items()} if steps > 0 else {}
+
+
+class ReusableModelEvaluator:
+    """Evaluate many state_dict variants while reusing preloaded batches and model shells."""
+
+    def __init__(self, batches: list[dict], device: torch.device, outer_width: int = 128) -> None:
+        _optimize_runtime(device)
+        self.batches = batches
+        self.device = device
+        self.outer_width = outer_width
+        self._models: dict[tuple, SeamHarmonizerV3] = {}
+
+    def _get_model(self, state_dict: dict[str, torch.Tensor], meta: dict[str, Any]) -> SeamHarmonizerV3:
+        sig = _model_signature(state_dict, meta)
+        model = self._models.get(sig)
+        correction_limits = (meta.get("config") or {}).get("model", {}).get("correction_limits")
+        if model is None:
+            model = _build_model_from_signature(sig, correction_limits, self.device)
+            self._models[sig] = model
+        else:
+            model.correction_limits = dict(DEFAULT_CORRECTION_LIMITS)
+            if correction_limits is not None:
+                model.correction_limits.update({k: float(v) for k, v in correction_limits.items()})
+        result = model.load_state_dict(state_dict, strict=False)
+        if result.unexpected_keys:
+            raise RuntimeError(f"Unexpected keys in state_dict: {result.unexpected_keys[:5]}")
+        model.eval()
+        return model
+
+    def evaluate(
+        self,
+        state_dict: dict[str, torch.Tensor],
+        meta: dict[str, Any],
+        *,
+        fast: bool,
+    ) -> dict[str, float]:
+        model = self._get_model(state_dict, meta)
+        if fast:
+            return eval_with_preloaded_fast(model, self.batches, self.outer_width)
+        return eval_with_preloaded(model, self.batches, self.outer_width)
+
+    def close(self) -> None:
+        for model in self._models.values():
+            del model
+        self._models.clear()
+        free_memory()
 
 
 def run_eval_on_preloaded(
