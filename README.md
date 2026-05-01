@@ -57,4 +57,4 @@ The current export artifact name is `seam_harmonizer_v3.safetensors` and the Com
 
 Use [seam_harmonizer_train_eval_colab.ipynb](/Users/andreyev-a/pet_projects/unet_seam/colab/seam_harmonizer_train_eval_colab.ipynb). It expects the harmonizer training bundle above and does not require cached strips.
 
-For model surgery on Colab GPU, use [model_surgery_colab.ipynb](/Users/andreyev-a/pet_projects/unet_seam/colab/model_surgery_colab.ipynb). It clones the repo from git, copies `synthetic_triplets_500` and checkpoints locally, patches a runtime surgery config, and syncs results back to Google Drive.
+For model surgery on Colab GPU, use [model_surgery_colab.ipynb](/Users/andreyev-a/pet_projects/unet_seam/colab/model_surgery_colab.ipynb). It expects a Google Drive layout like `MyDrive/unet_seam_runs/synthetic_triplets_500`, `MyDrive/unet_seam_runs/run_001`, ..., `MyDrive/unet_seam_runs/model_surgery_runs`, then clones the repo from git, copies triplets and run checkpoints locally, patches a runtime surgery config, and syncs results back to Drive.
