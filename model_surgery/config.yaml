@@ -1,0 +1,79 @@
+runs_dir: outputs/unet_seam_runs
+local_checkpoints_dir: outputs/checkpoints
+manifest: manifests/input_raw_manifest.jsonl
+output_dir: model_surgery/outputs
+target_quality_score: 12.0   # _quality() lower=better; 8.19 was our best so far
+target_boundary_ciede2000: 2.10
+target_confidence_mean: 0.28
+
+eval:
+  # Pre-materialized 500-triplet dataset — fastest eval, fully reproducible.
+  # Set to null to fall back to on-the-fly SyntheticStripDataset from manifest.
+  materialized_dir: outputs/synthetic_triplets_500
+  mini_strips: 80        # strips for fast cycle eval (subset of 500)
+  full_strips: 500       # full 500-triplet eval for final verification
+  outer_width: 128
+  inner_width: 128
+  strip_height: 1024
+  boundary_band_px: 24
+  batch_size: 4          # small batch — 32GB unified memory safety
+  seed: 20260501
+
+stages:
+  s0_survey: true
+  s1_gate_search: true
+  s2_ablation: true
+  s3_merge: true
+  s4_surgery: true
+  s5_cycle: true
+
+s1_gate_search:
+  gate_bias_range: [-0.05, -1.60]
+  n_points: 20
+  gain_limit_range: [1.2, 2.2]
+  gain_n_points: 5
+  detail_limit_range: [0.15, 0.40]
+  detail_n_points: 4
+
+s2_ablation:
+  n_strips: 30
+  heads:
+    - name: gain
+      channels: [0]
+    - name: gamma
+      channels: [1]
+    - name: bias
+      channels: [2, 3, 4]
+    - name: mix
+      channels: [5, 6, 7, 8, 9, 10, 11, 12, 13]
+    - name: detail
+      channels: [14, 15, 16]
+    - name: gate
+      channels: [17]
+
+s3_merge:
+  alphas: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80, 0.90]
+  selective_heads:
+    - gain
+    - gate
+    - detail
+    - bias
+
+s4_surgery:
+  heads_to_transplant:
+    - gain
+    - gate
+    - detail
+    - bias
+    - mix
+
+s5_cycle:
+  max_cycles: 40
+  patience: 8             # stop if no improvement for N cycles
+  top_k_base: 3           # how many best checkpoints to use as cycle bases
+  finetune_on_plateau:
+    enabled: true
+    plateau_cycles: 5
+    epochs: 2
+    lr: 5.0e-6
+    freeze_correction_epochs: 0
