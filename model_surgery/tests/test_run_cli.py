@@ -49,7 +49,8 @@ def test_config_s1_has_grid_params(cfg):
 
 def test_config_s5_cycle_has_required_keys(cfg):
     s5 = cfg["s5_cycle"]
-    for key in ["max_cycles", "patience", "top_k_base", "finetune_on_plateau"]:
+    for key in ["max_cycles", "patience", "top_k_base", "rerank_top_k",
+                "early_stop_no_improve_cycles", "finetune_on_plateau"]:
         assert key in s5, f"s5_cycle missing key: {key}"
     ft = s5["finetune_on_plateau"]
     for key in ["enabled", "plateau_cycles", "epochs", "lr"]:

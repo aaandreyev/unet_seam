@@ -175,6 +175,7 @@ def cycle_loop(
     top_k_base = s_cfg["top_k_base"]
     use_fast_proxy = bool(s_cfg.get("use_fast_proxy", True))
     rerank_top_k = int(s_cfg.get("rerank_top_k", 8))
+    early_stop_no_improve_cycles = int(s_cfg.get("early_stop_no_improve_cycles", patience))
     mat_dir = _mat_dir(eval_cfg)
 
     loader = build_loader(
@@ -203,7 +204,7 @@ def cycle_loop(
 
     # Load initial pool (top_k_base checkpoints)
     pool_entries: list[tuple[dict, dict, str]] = []
-    for row in survey_rows[:max(top_k_base, 6)]:
+    for row in survey_rows[:top_k_base]:
         st, me = load_ema(Path(row["path"]))
         pool_entries.append((st, me, row["name"]))
     free_memory()
@@ -234,6 +235,7 @@ def cycle_loop(
 
     history: list[dict] = []
     stale_count = 0
+    had_any_improvement = False
     # Support absolute target (target_quality_score) or relative improvement.
     abs_target = cfg.get("target_quality_score")
     rel_target = cfg.get("target_quality_relative")
@@ -356,6 +358,7 @@ def cycle_loop(
             current_meta = cycle_best_meta
             current_q = cycle_best_q
             stale_count = 0
+            had_any_improvement = True
             pool_entries.append((clone_state(current_state), copy.deepcopy(current_meta),
                                   f"cycle{cycle_idx+1}"))
             print(f"\n[S5] Cycle {cycle_idx+1}: IMPROVED → Q={current_q:.3f} "
@@ -377,8 +380,13 @@ def cycle_loop(
             log.log("target_reached", cycle=cycle_idx + 1, q=current_q)
             break
 
+        if stale_count >= early_stop_no_improve_cycles and not had_any_improvement:
+            print(f"\n[S5] No improvement for {stale_count} cycles from the starting checkpoint. Stopping early.")
+            log.log("no_improvement_early_stop", cycle=cycle_idx + 1, stale_count=stale_count, q=current_q)
+            break
+
         plateau_every = s_cfg["finetune_on_plateau"]["plateau_cycles"]
-        if stale_count > 0 and stale_count % plateau_every == 0:
+        if had_any_improvement and stale_count > 0 and stale_count % plateau_every == 0:
             print(f"\n[S5] Plateau for {stale_count} cycles — attempting fine-tune...")
             ft_result = _run_finetune(current_state, current_meta, cfg, out_dir, log)
             if ft_result is not None:
