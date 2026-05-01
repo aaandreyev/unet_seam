@@ -84,9 +84,29 @@ def test_quality_score_lower_is_better():
 def test_quality_score_with_empty_metrics():
     q = quality_score({})
     assert isinstance(q, float)
-    # Empty metrics default to 1.0 for most terms → large but finite score
-    # (nan is produced when baseline==0 and de==inf — acceptable, just check type)
-    assert q != q or q >= 0  # nan or non-negative
+    assert q >= 0 or q != q  # non-negative or nan (when baseline=0)
+
+
+def test_quality_score_missing_penalty_metrics_dont_inflate():
+    """Older checkpoints without overcorrection_mae etc. must not be penalised."""
+    good_seam = {
+        "boundary_mae_16": 0.0145, "boundary_ciede2000_16": 2.15,
+        "baseline_boundary_mae_16": 0.040, "baseline_boundary_ciede2000_16": 4.67,
+        "lowfreq_mae": 0.018, "confidence_mean": 0.38,
+        # No overcorrection_mae, delta_*_profile_mae — like stage3 checkpoint
+    }
+    bad_seam = {
+        "boundary_mae_16": 0.030, "boundary_ciede2000_16": 3.5,
+        "baseline_boundary_mae_16": 0.040, "baseline_boundary_ciede2000_16": 4.67,
+        "lowfreq_mae": 0.035, "confidence_mean": 0.55,
+        "overcorrection_mae": 0.008, "delta_luma_profile_mae": 0.02,
+        "delta_chroma_profile_mae": 0.02,
+    }
+    q_good = quality_score(good_seam)
+    q_bad = quality_score(bad_seam)
+    assert q_good < q_bad, (
+        f"Better seam should rank higher (lower Q): good_seam Q={q_good:.1f}, bad_seam Q={q_bad:.1f}"
+    )
 
 
 def test_quality_score_ignores_unknown_keys():

@@ -2,7 +2,12 @@ runs_dir: outputs/unet_seam_runs
 local_checkpoints_dir: outputs/checkpoints
 manifest: manifests/input_raw_manifest.jsonl
 output_dir: model_surgery/outputs
-target_quality_score: 12.0   # _quality() lower=better; 8.19 was our best so far
+# Absolute target for training-time Colab eval (~8 is best-ever). On local materialized
+# dataset absolute numbers differ — use target_quality_relative instead for surgery.
+target_quality_score: null
+# Surgery stops when quality improves by this fraction from the initial best checkpoint.
+# 0.12 = stop if 12% better than starting point. Set null to run all cycles.
+target_quality_relative: 0.12
 target_boundary_ciede2000: 2.10
 target_confidence_mean: 0.28
 

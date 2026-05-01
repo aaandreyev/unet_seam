@@ -53,7 +53,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     stages_to_run = {s.strip() for s in args.stages.split(",")}
 
-    from model_surgery.lib.reporting import RunLog, save_json
+    from model_surgery.lib.reporting import RunLog
     log_path = out_dir / "run.jsonl"
     t0 = time.monotonic()
 

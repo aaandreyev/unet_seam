@@ -18,6 +18,9 @@ Op tuple format: (label, state, meta, owns_state)
 from __future__ import annotations
 
 import copy
+import shutil
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -117,8 +120,6 @@ def _run_finetune(
     if not ft_cfg.get("enabled", False):
         return None
     try:
-        import subprocess
-        import sys
         import yaml
 
         base_cfg_path = Path("configs/finetune_harmonizer_stage8_soft.yaml")
@@ -154,7 +155,6 @@ def _run_finetune(
 
         canonical = Path("outputs/checkpoints/best_harmonizer_quality.pt")
         if canonical.exists():
-            import shutil
             shutil.copy2(canonical, ft_out_ckpt)
             new_state, new_meta = load_ema(ft_out_ckpt)
             log.log("finetune_done", saved_to=str(ft_out_ckpt))
@@ -231,7 +231,17 @@ def cycle_loop(
 
     history: list[dict] = []
     stale_count = 0
-    target_q = float(cfg["target_quality_score"])
+    # Support absolute target (target_quality_score) or relative improvement.
+    abs_target = cfg.get("target_quality_score")
+    rel_target = cfg.get("target_quality_relative")
+    if abs_target is not None:
+        target_q = float(abs_target)
+    elif rel_target is not None:
+        target_q = current_q * (1.0 - float(rel_target))
+    else:
+        target_q = -float("inf")  # never stop early
+    log.log("cycle_target", target_q=target_q, initial_q=current_q,
+            abs_target=abs_target, rel_target=rel_target)
     t_start = time.monotonic()
     last_improvement_op: str | None = None
 

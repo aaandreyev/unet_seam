@@ -5,7 +5,6 @@ On M1 MPS ~10s for 60 strips with batch_size=4.
 """
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Any
 
@@ -125,9 +124,22 @@ def run_eval(
 
 
 def quality_score(metrics: dict[str, float]) -> float:
-    """Import and call the canonical _quality function."""
+    """Surgery-safe quality score.
+
+    _quality() from train_harmonizer uses 1.0 as default for missing metrics like
+    overcorrection_mae, delta_luma_profile_mae, delta_chroma_profile_mae — this
+    massively penalises older checkpoints that weren't evaluated for those metrics.
+    Surgery needs consistent relative ranking, so we substitute 0.0 for missing
+    penalty-only metrics (no penalty when unknown, rather than maximum penalty).
+    """
     from scripts.train_harmonizer import _quality
-    return _quality(metrics)
+    safe = dict(metrics)
+    # These terms scale linearly and default to 1.0 in _quality() — use 0 when missing.
+    for key in ("overcorrection_mae", "delta_luma_profile_mae", "delta_chroma_profile_mae",
+                "confidence_alignment_mae"):
+        if key not in safe:
+            safe[key] = 0.0
+    return _quality(safe)
 
 
 def metrics_summary(metrics: dict[str, float]) -> str:

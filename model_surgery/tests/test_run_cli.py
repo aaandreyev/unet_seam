@@ -62,9 +62,17 @@ def test_config_stages_flags(cfg):
         assert isinstance(stages[key], bool)
 
 
-def test_config_target_quality_is_float(cfg):
-    assert isinstance(cfg["target_quality_score"], (int, float))
-    assert cfg["target_quality_score"] > 0
+def test_config_target_quality_has_at_least_one_stop_condition(cfg):
+    """Either absolute or relative target must be set (or both)."""
+    abs_tgt = cfg.get("target_quality_score")
+    rel_tgt = cfg.get("target_quality_relative")
+    assert abs_tgt is not None or rel_tgt is not None, (
+        "at least one of target_quality_score or target_quality_relative must be set"
+    )
+    if abs_tgt is not None:
+        assert float(abs_tgt) > 0
+    if rel_tgt is not None:
+        assert 0.0 < float(rel_tgt) < 1.0, "target_quality_relative must be between 0 and 1"
 
 
 def test_config_materialized_dir_points_to_real_path(cfg):
