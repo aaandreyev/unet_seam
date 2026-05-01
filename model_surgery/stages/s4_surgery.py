@@ -20,7 +20,10 @@ from tqdm import tqdm
 from model_surgery.lib.checkpoint_io import (
     free_memory, load_ema, save_surgery_checkpoint, transplant_head, HEAD_SLICES,
 )
-from model_surgery.lib.eval_mini import build_loader, metrics_summary, quality_score, run_eval
+from model_surgery.lib.eval_mini import (
+    _pick_device, build_loader, metrics_summary, preload_batches,
+    quality_score, run_eval_on_preloaded,
+)
 from model_surgery.lib.reporting import RunLog, save_json
 
 
@@ -46,7 +49,11 @@ def surgery(
         strip_height=eval_cfg["strip_height"], boundary_band_px=eval_cfg["boundary_band_px"],
         batch_size=eval_cfg["batch_size"], seed=eval_cfg["seed"],
         materialized_dir=mat_dir,
+        num_workers=int(eval_cfg.get("num_workers", 0)),
+        materialized_preload=bool(eval_cfg.get("materialized_preload", False)),
     )
+    device = _pick_device()
+    preloaded = preload_batches(loader, device)
 
     combos = [
         (b, d, h)
@@ -82,7 +89,9 @@ def surgery(
 
         try:
             new_state = transplant_head(base_state, donor_state, head)
-            m = run_eval(new_state, base_meta, loader, outer_width=eval_cfg["outer_width"])
+            m = run_eval_on_preloaded(
+                new_state, base_meta, preloaded, device=device, outer_width=eval_cfg["outer_width"]
+            )
             q = quality_score(m)
             result = {
                 "base": base_row["name"], "donor": donor_row["name"],

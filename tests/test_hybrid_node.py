@@ -9,7 +9,7 @@ def test_hybrid_node_auto_prefers_blend_for_rectangular_inside(monkeypatch):
     def fake_load_model(path: str, device: str = "cpu"):
         return object(), {}
 
-    def fake_apply(model, image, mask, bbox, sides, inner_width, strength):
+    def fake_apply(model, image, mask, bbox, sides, inner_width, strength, blend_falloff_px=None):
         called["ml"] += 1
         return image + 0.1 * mask, {"per_side": {}}
 
@@ -31,6 +31,7 @@ def test_hybrid_node_auto_prefers_blend_for_rectangular_inside(monkeypatch):
         "dummy.safetensors",
         "auto",
         "inside",
+        128,
         128,
         1.0,
         8,
@@ -59,7 +60,7 @@ def test_hybrid_node_auto_falls_back_to_cv_for_nonrectangular_mask(monkeypatch):
     def fake_load_model(path: str, device: str = "cpu"):
         return object(), {}
 
-    def fake_apply(model, image, mask, bbox, sides, inner_width, strength):
+    def fake_apply(model, image, mask, bbox, sides, inner_width, strength, blend_falloff_px=None):
         called["ml"] += 1
         return image, {"per_side": {}}
 
@@ -82,6 +83,7 @@ def test_hybrid_node_auto_falls_back_to_cv_for_nonrectangular_mask(monkeypatch):
         "dummy.safetensors",
         "auto",
         "inside",
+        128,
         128,
         1.0,
         8,
@@ -108,7 +110,7 @@ def test_hybrid_node_blend_respects_protect_mask(monkeypatch):
     def fake_load_model(path: str, device: str = "cpu"):
         return object(), {}
 
-    def fake_apply(model, image, mask, bbox, sides, inner_width, strength):
+    def fake_apply(model, image, mask, bbox, sides, inner_width, strength, blend_falloff_px=None):
         return image + 0.4 * mask, {"per_side": {}}
 
     def fake_cv(image, mask, **kwargs):
@@ -130,6 +132,7 @@ def test_hybrid_node_blend_respects_protect_mask(monkeypatch):
         "dummy.safetensors",
         "blend",
         "inside",
+        128,
         128,
         1.0,
         8,
@@ -155,7 +158,7 @@ def test_hybrid_node_blend_injects_cv_residual_stronger_near_seam(monkeypatch):
     def fake_load_model(path: str, device: str = "cpu"):
         return object(), {}
 
-    def fake_apply(model, image, mask, bbox, sides, inner_width, strength):
+    def fake_apply(model, image, mask, bbox, sides, inner_width, strength, blend_falloff_px=None):
         return image + 0.4 * mask, {"per_side": {}}
 
     def fake_cv(image, mask, **kwargs):
@@ -175,6 +178,7 @@ def test_hybrid_node_blend_injects_cv_residual_stronger_near_seam(monkeypatch):
         "dummy.safetensors",
         "blend",
         "inside",
+        128,
         128,
         1.0,
         8,

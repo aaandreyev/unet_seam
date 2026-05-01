@@ -17,6 +17,7 @@ def main() -> None:
     ap.add_argument("--val-batch-size", type=int, required=True)
     ap.add_argument("--train-epochs", type=int, required=True)
     ap.add_argument("--train-num-workers", type=int, required=True)
+    ap.add_argument("--eval-num-workers", type=int, default=None)
     ap.add_argument("--primary-checkpoint", type=str, default="best_harmonizer_quality.pt")
     ap.add_argument("--train-config-name", type=str, default="train_harmonizer_v1.yaml")
     ap.add_argument("--materialized-manifest", type=Path, default=None)
@@ -44,6 +45,7 @@ def main() -> None:
     eval_cfg["checkpoint"] = str(local_ckpt / args.primary_checkpoint)
     eval_cfg["report_root"] = str(local_eval)
     eval_cfg["batch_size"] = args.val_batch_size
+    eval_cfg["num_workers"] = int(args.eval_num_workers if args.eval_num_workers is not None else min(max(args.train_num_workers // 2, 0), 4))
     eval_cfg["source_manifest"] = str(dr / "manifests" / "input_raw_manifest.jsonl")
     if args.materialized_manifest is not None:
         eval_cfg["materialized_manifest"] = str(args.materialized_manifest)

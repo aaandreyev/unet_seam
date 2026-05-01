@@ -22,6 +22,8 @@ eval:
   strip_height: 1024
   boundary_band_px: 24
   batch_size: 4          # small batch — 32GB unified memory safety
+  num_workers: 0
+  materialized_preload: true
   seed: 20260501
 
 stages:

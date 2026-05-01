@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from model_surgery.lib.checkpoint_io import HEAD_SLICES, clone_state
-from model_surgery.stages.s5_cycle import _build_operations
+from model_surgery.stages.s5_cycle import _count_operations, _iter_operations
 from src.models.harmonizer import SeamHarmonizerV3
 
 
@@ -55,36 +55,38 @@ def pool_entries(pool_state_1, pool_state_2, base_meta):
     ]
 
 
-def test_build_operations_returns_list(base_state, base_meta, pool_entries):
-    ops = _build_operations(base_state, base_meta, pool_entries)
-    assert isinstance(ops, list)
+def test_iter_operations_returns_items(base_state, base_meta, pool_entries):
+    ops = list(_iter_operations(base_state, base_meta, pool_entries))
     assert len(ops) > 0
 
 
 def test_build_operations_tuple_format(base_state, base_meta, pool_entries):
-    ops = _build_operations(base_state, base_meta, pool_entries)
+    ops = list(_iter_operations(base_state, base_meta, pool_entries))
     for op in ops:
         assert len(op) == 4, f"op must be 4-tuple (label, state, meta, owns_state), got {len(op)}"
         label, state, meta, owns_state = op
         assert isinstance(label, str)
-        assert isinstance(state, dict)
+        if owns_state:
+            assert isinstance(state, dict)
+        else:
+            assert state is None
         assert isinstance(meta, dict)
         assert isinstance(owns_state, bool)
 
 
 def test_gate_ops_share_state_reference(base_state, base_meta, pool_entries):
     """Gate/limit variants must share base_state reference (owns_state=False, no clone)."""
-    ops = _build_operations(base_state, base_meta, pool_entries)
+    ops = list(_iter_operations(base_state, base_meta, pool_entries))
     gate_ops = [op for op in ops if op[0].startswith("gate_")]
     assert len(gate_ops) > 0, "expected gate ops"
     for label, state, meta, owns_state in gate_ops:
         assert owns_state is False, f"gate op '{label}' must have owns_state=False"
-        assert state is base_state, f"gate op '{label}' must share base_state reference"
+        assert state is None, f"gate op '{label}' must not materialize a state"
 
 
 def test_gate_ops_have_different_meta(base_state, base_meta, pool_entries):
     """Each gate op must have its own meta (different gate_bias value)."""
-    ops = _build_operations(base_state, base_meta, pool_entries)
+    ops = list(_iter_operations(base_state, base_meta, pool_entries))
     gate_ops = [op for op in ops if op[0].startswith("gate_")]
     metas = [op[2] for op in gate_ops]
     gate_biases = [m["config"]["model"]["correction_limits"]["gate_bias"] for m in metas]
@@ -94,13 +96,13 @@ def test_gate_ops_have_different_meta(base_state, base_meta, pool_entries):
 def test_gate_ops_do_not_mutate_base_meta(base_state, base_meta, pool_entries):
     """Building ops must not modify original base_meta."""
     original_gb = base_meta["config"]["model"]["correction_limits"]["gate_bias"]
-    _build_operations(base_state, base_meta, pool_entries)
+    list(_iter_operations(base_state, base_meta, pool_entries))
     assert base_meta["config"]["model"]["correction_limits"]["gate_bias"] == original_gb
 
 
 def test_merge_ops_own_state(base_state, base_meta, pool_entries):
     """Linear merge ops must create new tensors (owns_state=True)."""
-    ops = _build_operations(base_state, base_meta, pool_entries)
+    ops = list(_iter_operations(base_state, base_meta, pool_entries))
     merge_ops = [op for op in ops if "merge_linear" in op[0]]
     assert len(merge_ops) > 0
     for label, state, meta, owns_state in merge_ops:
@@ -110,7 +112,7 @@ def test_merge_ops_own_state(base_state, base_meta, pool_entries):
 
 def test_transplant_ops_own_state(base_state, base_meta, pool_entries):
     """Transplant ops must create new tensor dicts."""
-    ops = _build_operations(base_state, base_meta, pool_entries)
+    ops = list(_iter_operations(base_state, base_meta, pool_entries))
     transplant_ops = [op for op in ops if "transplant_" in op[0]]
     assert len(transplant_ops) > 0
     for label, state, meta, owns_state in transplant_ops:
@@ -118,7 +120,7 @@ def test_transplant_ops_own_state(base_state, base_meta, pool_entries):
 
 
 def test_head_blend_ops_own_state(base_state, base_meta, pool_entries):
-    ops = _build_operations(base_state, base_meta, pool_entries)
+    ops = list(_iter_operations(base_state, base_meta, pool_entries))
     blend_ops = [op for op in ops if "head_blend_" in op[0]]
     assert len(blend_ops) > 0
     for label, state, meta, owns_state in blend_ops:
@@ -126,19 +128,19 @@ def test_head_blend_ops_own_state(base_state, base_meta, pool_entries):
 
 
 def test_all_heads_covered_in_transplants(base_state, base_meta, pool_entries):
-    ops = _build_operations(base_state, base_meta, pool_entries)
+    ops = list(_iter_operations(base_state, base_meta, pool_entries))
     transplant_heads = {op[0].split("_")[1] for op in ops if op[0].startswith("transplant_")}
     assert transplant_heads == set(HEAD_SLICES.keys())
 
 
 def test_all_heads_covered_in_blends(base_state, base_meta, pool_entries):
-    ops = _build_operations(base_state, base_meta, pool_entries)
+    ops = list(_iter_operations(base_state, base_meta, pool_entries))
     blend_heads = {op[0].split("_")[2] for op in ops if op[0].startswith("head_blend_")}
     assert blend_heads == set(HEAD_SLICES.keys())
 
 
 def test_ops_states_are_finite(base_state, base_meta, pool_entries):
-    ops = _build_operations(base_state, base_meta, pool_entries)
+    ops = list(_iter_operations(base_state, base_meta, pool_entries))
     # Check only owned states (shared refs are already tested elsewhere)
     for label, state, meta, owns_state in ops:
         if owns_state:
@@ -147,12 +149,12 @@ def test_ops_states_are_finite(base_state, base_meta, pool_entries):
 
 
 def test_no_memory_leak_from_gate_ops(base_state, base_meta, pool_entries):
-    """Gate ops share state by reference — creating 240 of them shouldn't allocate 240 state_dicts."""
+    """Gate ops should stay lightweight and avoid cloning model states."""
     import tracemalloc
     tracemalloc.start()
     # Baseline
     snapshot1 = tracemalloc.take_snapshot()
-    ops = _build_operations(base_state, base_meta, pool_entries)
+    ops = list(_iter_operations(base_state, base_meta, pool_entries))
     gate_ops = [op for op in ops if op[0].startswith("gate_")]
     snapshot2 = tracemalloc.take_snapshot()
     tracemalloc.stop()
@@ -166,3 +168,8 @@ def test_no_memory_leak_from_gate_ops(base_state, base_meta, pool_entries):
     assert total_delta_mb < 20, (
         f"Gate ops allocated {total_delta_mb:.1f}MB — likely cloning state instead of sharing ref"
     )
+
+
+def test_count_operations_matches_iterator(base_state, base_meta, pool_entries):
+    ops = list(_iter_operations(base_state, base_meta, pool_entries))
+    assert len(ops) == _count_operations(len(pool_entries))

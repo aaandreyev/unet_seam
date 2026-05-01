@@ -27,7 +27,8 @@ def test_config_has_all_required_keys(cfg):
 
 def test_config_eval_has_all_keys(cfg):
     required = ["materialized_dir", "mini_strips", "full_strips", "outer_width",
-                "inner_width", "strip_height", "boundary_band_px", "batch_size", "seed"]
+                "inner_width", "strip_height", "boundary_band_px", "batch_size",
+                "num_workers", "materialized_preload", "seed"]
     for key in required:
         assert key in cfg["eval"], f"config.eval missing key: {key}"
 

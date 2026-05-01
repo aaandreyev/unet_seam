@@ -6,6 +6,7 @@ On M1 MPS ~10s for 60 strips with batch_size=4.
 from __future__ import annotations
 
 from pathlib import Path
+from contextlib import nullcontext
 from typing import Any
 
 import torch
@@ -21,11 +22,17 @@ from model_surgery.lib.checkpoint_io import free_memory
 
 
 def _pick_device() -> torch.device:
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
     if torch.cuda.is_available():
         return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
     return torch.device("cpu")
+
+
+def _autocast_context(device: torch.device):
+    if device.type == "cuda":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    return nullcontext()
 
 
 def _infer_channels_blocks(
@@ -88,13 +95,16 @@ def build_model(state_dict: dict[str, torch.Tensor], meta: dict[str, Any],
 
     if result.unexpected_keys:
         raise RuntimeError(f"Unexpected keys in state_dict: {result.unexpected_keys[:5]}")
+    if device.type == "cuda":
+        model = model.to(memory_format=torch.channels_last)
     model.eval()
     return model
 
 
 def build_loader(manifest: Path, n_strips: int, outer_width: int, inner_width: int,
                  strip_height: int, boundary_band_px: int, batch_size: int,
-                 seed: int, materialized_dir: Path | None = None) -> DataLoader:
+                 seed: int, materialized_dir: Path | None = None,
+                 num_workers: int = 0, materialized_preload: bool = False) -> DataLoader:
     """Build eval DataLoader.
 
     If materialized_dir is provided and contains a manifest.jsonl, uses
@@ -109,14 +119,22 @@ def build_loader(manifest: Path, n_strips: int, outer_width: int, inner_width: i
                 mat_manifest,
                 split=None,  # use all splits
                 boundary_band_px=boundary_band_px,
-                preload=False,
+                preload=materialized_preload,
             )
             n = min(n_strips, len(ds))
             rng = torch.Generator().manual_seed(seed)
             indices = torch.randperm(len(ds), generator=rng)[:n].tolist()
             subset = Subset(ds, indices)
+            loader_kwargs = {
+                "num_workers": num_workers,
+                "collate_fn": collate_strip_batch,
+                "pin_memory": torch.cuda.is_available(),
+            }
+            if num_workers > 0:
+                loader_kwargs["persistent_workers"] = True
+                loader_kwargs["prefetch_factor"] = 2
             return DataLoader(subset, batch_size=batch_size, shuffle=False,
-                              num_workers=0, collate_fn=collate_strip_batch)
+                              **loader_kwargs)
 
     spec = StripSpec(strip_height=strip_height, outer_width=outer_width,
                      inner_width=inner_width, seam_jitter_px=0)
@@ -131,8 +149,16 @@ def build_loader(manifest: Path, n_strips: int, outer_width: int, inner_width: i
     rng = torch.Generator().manual_seed(seed)
     indices = torch.randperm(len(ds), generator=rng)[:n].tolist()
     subset = Subset(ds, indices)
+    loader_kwargs = {
+        "num_workers": num_workers,
+        "collate_fn": collate_strip_batch,
+        "pin_memory": torch.cuda.is_available(),
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = 2
     return DataLoader(subset, batch_size=batch_size, shuffle=False,
-                      num_workers=0, collate_fn=collate_strip_batch)
+                      **loader_kwargs)
 
 
 def preload_batches(loader: DataLoader, device: torch.device) -> list[dict]:
@@ -140,7 +166,7 @@ def preload_batches(loader: DataLoader, device: torch.device) -> list[dict]:
     batches = []
     for batch in loader:
         batches.append({
-            k: v.to(device) if isinstance(v, torch.Tensor) else v
+            k: v.to(device, non_blocking=(device.type == "cuda")) if isinstance(v, torch.Tensor) else v
             for k, v in batch.items()
         })
     return batches
@@ -164,23 +190,24 @@ def cache_coarse_outputs(
     """
     cached: list[dict] = []
     with torch.inference_mode():
-        for batch in batches:
-            x = batch["input"]
-            out = model(x)
-            cached.append({
-                # Raw coarse outputs (small tensors, cheap to store)
-                "gain_lowres":      out["gain_lowres"].clone(),
-                "gamma_lowres":     out["gamma_lowres"].clone(),
-                "bias_lowres":      out["bias_lowres"].clone(),
-                "mix_lowres":       out["mix_lowres"].clone(),
-                "detail_lowres":    out["detail_lowres"].clone(),
-                "gate_lowres":      out["gate_lowres"].clone(),
-                "attention_lowres": out["attention_lowres"].clone(),
-                # Full-res data needed for metrics
-                "x_rgb":     x[:, :3].clone(),
-                "input_rgb": batch["input_rgb"],
-                "target":    batch["target"],
-            })
+        with _autocast_context(next(model.parameters()).device):
+            for batch in batches:
+                x = batch["input"]
+                out = model(x)
+                cached.append({
+                    # Raw coarse outputs (small tensors, cheap to store)
+                    "gain_lowres":      out["gain_lowres"].clone(),
+                    "gamma_lowres":     out["gamma_lowres"].clone(),
+                    "bias_lowres":      out["bias_lowres"].clone(),
+                    "mix_lowres":       out["mix_lowres"].clone(),
+                    "detail_lowres":    out["detail_lowres"].clone(),
+                    "gate_lowres":      out["gate_lowres"].clone(),
+                    "attention_lowres": out["attention_lowres"].clone(),
+                    # Full-res data needed for metrics
+                    "x_rgb":     x[:, :3].clone(),
+                    "input_rgb": batch["input_rgb"],
+                    "target":    batch["target"],
+                })
     return cached
 
 
@@ -234,17 +261,18 @@ def eval_with_model(
     agg: dict[str, float] = {}
     steps = 0
     with torch.inference_mode():
-        for batch in loader:
-            batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v
-                     for k, v in batch.items()}
-            out = model(batch["input"])
-            m = evaluate_harmonizer_batch(
-                out["corrected_strip"], batch["input_rgb"], batch["target"], out,
-                outer_width=outer_width,
-            )
-            for k, v in m.items():
-                agg[k] = agg.get(k, 0.0) + float(v)
-            steps += 1
+        with _autocast_context(device):
+            for batch in loader:
+                batch = {k: v.to(device, non_blocking=(device.type == "cuda")) if isinstance(v, torch.Tensor) else v
+                         for k, v in batch.items()}
+                out = model(batch["input"])
+                m = evaluate_harmonizer_batch(
+                    out["corrected_strip"], batch["input_rgb"], batch["target"], out,
+                    outer_width=outer_width,
+                )
+                for k, v in m.items():
+                    agg[k] = agg.get(k, 0.0) + float(v)
+                steps += 1
     return {k: v / steps for k, v in agg.items()} if steps > 0 else {}
 
 
@@ -261,16 +289,34 @@ def eval_with_preloaded(
     agg: dict[str, float] = {}
     steps = 0
     with torch.inference_mode():
-        for batch in batches:
-            out = model(batch["input"])
-            m = evaluate_harmonizer_batch(
-                out["corrected_strip"], batch["input_rgb"], batch["target"], out,
-                outer_width=outer_width,
-            )
-            for k, v in m.items():
-                agg[k] = agg.get(k, 0.0) + float(v)
-            steps += 1
+        with _autocast_context(next(model.parameters()).device):
+            for batch in batches:
+                out = model(batch["input"])
+                m = evaluate_harmonizer_batch(
+                    out["corrected_strip"], batch["input_rgb"], batch["target"], out,
+                    outer_width=outer_width,
+                )
+                for k, v in m.items():
+                    agg[k] = agg.get(k, 0.0) + float(v)
+                steps += 1
     return {k: v / steps for k, v in agg.items()} if steps > 0 else {}
+
+
+def run_eval_on_preloaded(
+    state_dict: dict[str, torch.Tensor],
+    meta: dict[str, Any],
+    batches: list[dict],
+    device: torch.device | None = None,
+    outer_width: int = 128,
+) -> dict[str, float]:
+    """Build model, eval on already preloaded device batches, free model."""
+    if device is None:
+        device = _pick_device()
+    model = build_model(state_dict, meta, device)
+    result = eval_with_preloaded(model, batches, outer_width)
+    del model
+    free_memory()
+    return result
 
 
 def run_eval(

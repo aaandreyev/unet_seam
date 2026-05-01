@@ -57,6 +57,9 @@ def main() -> None:
     model_cfg = train_cfg.get("model") or {}
     dataset_cfg = train_cfg.get("dataset") or {}
     device = pick_device()
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("high")
     model = SeamHarmonizerV3(
         in_channels=int(model_cfg.get("in_channels", 9)),
         channels=tuple(model_cfg.get("channels", [32, 64, 128, 192])),
@@ -65,6 +68,8 @@ def main() -> None:
         boundary_band_px=int(dataset_cfg.get("boundary_band_px", 24)),
         correction_limits=model_cfg.get("correction_limits"),
     ).to(device)
+    if device.type == "cuda":
+        model = model.to(memory_format=torch.channels_last)
     try:
         result = model.load_state_dict(ckpt["ema"], strict=False)
     except Exception as exc:  # noqa: BLE001
@@ -86,13 +91,20 @@ def main() -> None:
         )
     model.eval()
     dataset = _build_dataset(train_cfg, eval_cfg)
+    num_workers = int(eval_cfg.get("num_workers", 0))
+    loader_kwargs = {
+        "batch_size": int(eval_cfg.get("batch_size", 32)),
+        "shuffle": False,
+        "num_workers": num_workers,
+        "collate_fn": collate_strip_batch,
+        "pin_memory": device.type == "cuda",
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = True
+        loader_kwargs["prefetch_factor"] = 2
     loader = DataLoader(
         dataset,
-        batch_size=int(eval_cfg.get("batch_size", 32)),
-        shuffle=False,
-        num_workers=0,
-        collate_fn=collate_strip_batch,
-        pin_memory=device.type == "cuda",
+        **loader_kwargs,
     )
     loss_computer = HarmonizerLossComputer(
         outer_width=int(dataset_cfg.get("outer_width", 128)),

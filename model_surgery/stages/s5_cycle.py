@@ -30,12 +30,13 @@ import torch
 from tqdm import tqdm
 
 from model_surgery.lib.checkpoint_io import (
-    HEAD_SLICES, apply_gate_bias_to_state, clone_state, free_memory, linear_merge,
+    HEAD_SLICES, clone_state, free_memory, linear_merge,
     load_ema, save_surgery_checkpoint, selective_head_merge,
-    slerp_merge, transplant_head,
+    transplant_head,
 )
 from model_surgery.lib.eval_mini import (
-    build_loader, metrics_summary, quality_score, run_eval,
+    _pick_device, build_loader, build_model, cache_coarse_outputs, eval_from_cache,
+    metrics_summary, preload_batches, quality_score, run_eval, run_eval_on_preloaded,
 )
 from model_surgery.lib.reporting import RunLog, save_json
 
@@ -45,28 +46,19 @@ def _mat_dir(eval_cfg: dict) -> Path | None:
     return Path(md) if md else None
 
 
-# Op tuple type: (label, state, meta, owns_state)
-Op = tuple[str, dict, dict, bool]
+Op = tuple[str, dict | None, dict, bool]
 
 
-def _build_operations(
+def _iter_operations(
     current_state: dict,
     current_meta: dict,
     pool_states: list[tuple[dict, dict, str]],
-) -> list[Op]:
-    """Build ops for one cycle. Returns (label, state, meta, owns_state).
+) -> Any:
+    """Yield ops for one cycle lazily as (label, state, meta, owns_state).
 
     Gate/limit variants: owns_state=False (shared ref to current_state, no clone needed).
     Merge/transplant: owns_state=True (newly allocated tensor dict).
-
-    Memory budget per cycle (full 85MB model):
-      Gate/limit (240 ops): 0 extra MB — shared reference
-      Merge (7α × N_pool): N_pool × 85MB each created then freed immediately
-      Head blend (3α × 6heads × N_pool): same
-      Transplant (6heads × N_pool): same
-    Maximum concurrent: 1 newly allocated state at a time inside the loop.
     """
-    ops: list[Op] = []
     gate_biases = list(np.linspace(-0.05, -1.2, 12))
     gain_limits = [1.4, 1.6, 1.8, 2.0, 2.2]
     detail_limits = [0.18, 0.25, 0.32, 0.40]
@@ -83,33 +75,34 @@ def _build_operations(
                 m2 = copy.deepcopy(meta_gb)
                 m2["config"]["model"]["correction_limits"]["gain_limit"] = gl
                 m2["config"]["model"]["correction_limits"]["detail_limit"] = dl
-                # owns_state=False: current_state is shared, must NOT be deleted
-                ops.append((f"gate_gb={gb:.2f}_gl={gl:.1f}_dl={dl:.2f}",
-                             current_state, m2, False))
+                yield (f"gate_gb={gb:.2f}_gl={gl:.1f}_dl={dl:.2f}", None, m2, False)
 
     # 2. Linear merge: creates new tensor dict → owns_state=True
     for pool_state, _, pool_name in pool_states:
         for alpha in alphas:
             merged = linear_merge(current_state, pool_state, alpha)
-            ops.append((f"merge_linear_α={alpha:.2f}_{pool_name[:20]}",
-                         merged, current_meta, True))
+            yield (f"merge_linear_α={alpha:.2f}_{pool_name[:20]}", merged, current_meta, True)
 
     # 3. Selective head merge: creates new tensor dict → owns_state=True
     for pool_state, _, pool_name in pool_states:
         for head in heads:
             for alpha in [0.3, 0.5, 0.7]:
                 merged = selective_head_merge(current_state, pool_state, head, alpha)
-                ops.append((f"head_blend_{head}_α={alpha:.1f}_{pool_name[:20]}",
-                             merged, current_meta, True))
+                yield (f"head_blend_{head}_α={alpha:.1f}_{pool_name[:20]}", merged, current_meta, True)
 
     # 4. Head transplant: creates new tensor dict → owns_state=True
     for pool_state, _, pool_name in pool_states:
         for head in heads:
             transplanted = transplant_head(current_state, pool_state, head)
-            ops.append((f"transplant_{head}_from={pool_name[:20]}",
-                         transplanted, current_meta, True))
+            yield (f"transplant_{head}_from={pool_name[:20]}", transplanted, current_meta, True)
 
-    return ops
+
+def _count_operations(pool_size: int) -> int:
+    gate_ops = 12 * 5 * 4
+    linear_ops = 7 * pool_size
+    head_blend_ops = 6 * 3 * pool_size
+    transplant_ops = 6 * pool_size
+    return gate_ops + linear_ops + head_blend_ops + transplant_ops
 
 
 def _run_finetune(
@@ -188,6 +181,8 @@ def cycle_loop(
         strip_height=eval_cfg["strip_height"], boundary_band_px=eval_cfg["boundary_band_px"],
         batch_size=eval_cfg["batch_size"], seed=eval_cfg["seed"],
         materialized_dir=mat_dir,
+        num_workers=int(eval_cfg.get("num_workers", 0)),
+        materialized_preload=bool(eval_cfg.get("materialized_preload", False)),
     )
     full_loader = build_loader(
         manifest=Path(cfg["manifest"]),
@@ -196,7 +191,11 @@ def cycle_loop(
         strip_height=eval_cfg["strip_height"], boundary_band_px=eval_cfg["boundary_band_px"],
         batch_size=eval_cfg["batch_size"], seed=eval_cfg["seed"] + 1,
         materialized_dir=mat_dir,
+        num_workers=int(eval_cfg.get("num_workers", 0)),
+        materialized_preload=bool(eval_cfg.get("materialized_preload", False)),
     )
+    device = _pick_device()
+    preloaded = preload_batches(loader, device)
 
     # Load initial pool (top_k_base checkpoints)
     pool_entries: list[tuple[dict, dict, str]] = []
@@ -215,7 +214,9 @@ def cycle_loop(
         pt_path = out_dir / pt_name
         if pt_path.exists():
             st, me = load_ema(pt_path)
-            m = run_eval(st, me, loader, outer_width=eval_cfg["outer_width"])
+            m = run_eval_on_preloaded(
+                st, me, preloaded, device=device, outer_width=eval_cfg["outer_width"]
+            )
             q = quality_score(m)
             if q < current_q:
                 del current_state
@@ -251,18 +252,32 @@ def cycle_loop(
     for cycle_idx in cycle_bar:
         cycle_bar.set_postfix_str(f"best_Q={current_q:.3f} stale={stale_count}/{patience}")
 
-        ops = _build_operations(current_state, current_meta, pool_entries)
+        cycle_cached = None
+        current_model = build_model(current_state, current_meta, device)
+        cycle_cached = cache_coarse_outputs(current_model, preloaded)
+        del current_model
+        free_memory()
+
+        total_ops = _count_operations(len(pool_entries))
         cycle_best_q = current_q
         cycle_best_state: dict | None = None
         cycle_best_meta: dict | None = None
         cycle_best_label: str | None = None
 
-        op_bar = tqdm(ops, desc=f"  cycle {cycle_idx+1} ops", leave=False,
+        op_bar = tqdm(_iter_operations(current_state, current_meta, pool_entries), total=total_ops,
+                      desc=f"  cycle {cycle_idx+1} ops", leave=False,
                       bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]")
 
         for label, cand_state, cand_meta, owns_state in op_bar:
             try:
-                m = run_eval(cand_state, cand_meta, loader, outer_width=eval_cfg["outer_width"])
+                if not owns_state:
+                    limits = cand_meta.get("config", {}).get("model", {}).get("correction_limits", {})
+                    m = eval_from_cache(cycle_cached, limits, outer_width=eval_cfg["outer_width"])
+                else:
+                    assert cand_state is not None
+                    m = run_eval_on_preloaded(
+                        cand_state, cand_meta, preloaded, device=device, outer_width=eval_cfg["outer_width"]
+                    )
                 q = quality_score(m)
                 if q < cycle_best_q:
                     cycle_best_q = q
@@ -271,7 +286,7 @@ def cycle_loop(
                         del cycle_best_state
                         free_memory()
                     # Take ownership: clone if we don't own it (shared ref), keep if we do
-                    cycle_best_state = clone_state(cand_state) if not owns_state else cand_state
+                    cycle_best_state = clone_state(current_state) if not owns_state else cand_state
                     cycle_best_meta = cand_meta
                     cycle_best_label = label
                     op_bar.set_postfix_str(f"NEW_BEST Q={q:.3f} {label[:40]}")
@@ -285,6 +300,8 @@ def cycle_loop(
                 free_memory()
 
         op_bar.close()
+        del cycle_cached
+        free_memory()
 
         if cycle_best_state is not None and cycle_best_q < current_q:
             improvement = current_q - cycle_best_q
@@ -325,7 +342,9 @@ def cycle_loop(
             ft_result = _run_finetune(current_state, current_meta, cfg, out_dir, log)
             if ft_result is not None:
                 ft_state, ft_meta = ft_result
-                ft_m = run_eval(ft_state, ft_meta, loader, outer_width=eval_cfg["outer_width"])
+                ft_m = run_eval_on_preloaded(
+                    ft_state, ft_meta, preloaded, device=device, outer_width=eval_cfg["outer_width"]
+                )
                 ft_q = quality_score(ft_m)
                 if ft_q < current_q:
                     del current_state

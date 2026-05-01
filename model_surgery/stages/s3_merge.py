@@ -19,7 +19,10 @@ from model_surgery.lib.checkpoint_io import (
     clone_state, free_memory, linear_merge, load_ema,
     save_surgery_checkpoint, selective_head_merge, slerp_merge, HEAD_SLICES,
 )
-from model_surgery.lib.eval_mini import build_loader, metrics_summary, quality_score, run_eval
+from model_surgery.lib.eval_mini import (
+    _pick_device, build_loader, metrics_summary, preload_batches,
+    quality_score, run_eval_on_preloaded,
+)
 from model_surgery.lib.reporting import RunLog, save_json
 
 
@@ -44,7 +47,11 @@ def merge(
         strip_height=eval_cfg["strip_height"], boundary_band_px=eval_cfg["boundary_band_px"],
         batch_size=eval_cfg["batch_size"], seed=eval_cfg["seed"],
         materialized_dir=mat_dir,
+        num_workers=int(eval_cfg.get("num_workers", 0)),
+        materialized_preload=bool(eval_cfg.get("materialized_preload", False)),
     )
+    device = _pick_device()
+    preloaded = preload_batches(loader, device)
 
     pairs = [(i, j) for i, j in itertools.combinations(range(len(candidates)), 2)]
     n_linear = len(pairs) * len(alphas)
@@ -88,7 +95,9 @@ def merge(
             ]:
                 try:
                     merged = merge_fn(state_a, state_b, alpha)
-                    m = run_eval(merged, meta_a, loader, outer_width=eval_cfg["outer_width"])
+                    m = run_eval_on_preloaded(
+                        merged, meta_a, preloaded, device=device, outer_width=eval_cfg["outer_width"]
+                    )
                     q = quality_score(m)
                     result = {"type": merge_type, "a": name_a, "b": name_b,
                               "alpha": alpha, "quality": q, **m}
@@ -110,7 +119,9 @@ def merge(
             for head in sel_heads:
                 try:
                     merged = selective_head_merge(state_a, state_b, head, alpha)
-                    m = run_eval(merged, meta_a, loader, outer_width=eval_cfg["outer_width"])
+                    m = run_eval_on_preloaded(
+                        merged, meta_a, preloaded, device=device, outer_width=eval_cfg["outer_width"]
+                    )
                     q = quality_score(m)
                     result = {"type": f"head_blend_{head}", "a": name_a, "b": name_b,
                               "alpha": alpha, "head": head, "quality": q, **m}
