@@ -15,8 +15,8 @@ eval:
   # Pre-materialized 500-triplet dataset — fastest eval, fully reproducible.
   # Set to null to fall back to on-the-fly SyntheticStripDataset from manifest.
   materialized_dir: outputs/synthetic_triplets_500
-  mini_strips: 80        # strips for fast cycle eval (subset of 500)
-  full_strips: 500       # full 500-triplet eval for final verification
+  mini_strips: 20        # strips for fast cycle eval — enough for relative ranking
+  full_strips: 200       # larger eval for stage finals and best_model verification
   outer_width: 128
   inner_width: 128
   strip_height: 1024

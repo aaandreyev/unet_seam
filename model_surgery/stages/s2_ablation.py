@@ -17,8 +17,11 @@ from typing import Any
 import torch
 from tqdm import tqdm
 
-from model_surgery.lib.checkpoint_io import HEAD_SLICES, clone_state, free_memory, load_ema
-from model_surgery.lib.eval_mini import build_loader, quality_score, run_eval
+from model_surgery.lib.checkpoint_io import HEAD_SLICES, free_memory, load_ema
+from model_surgery.lib.eval_mini import (
+    _pick_device, build_loader, build_model,
+    eval_with_preloaded, preload_batches, quality_score,
+)
 from model_surgery.lib.reporting import RunLog, save_json
 
 
@@ -26,16 +29,6 @@ DISPLAY_METRICS = [
     "boundary_mae_16", "boundary_ciede2000_16", "lowfreq_mae",
     "overcorrection_mae", "confidence_mean", "gain_abs_log_mean", "detail_abs_mean",
 ]
-
-
-def _zero_head(state: dict[str, torch.Tensor], head: str) -> dict[str, torch.Tensor]:
-    sl = HEAD_SLICES[head]
-    out = clone_state(state)
-    for suffix in ("weight", "bias"):
-        key = f"coarse_head.2.{suffix}"
-        if key in out:
-            out[key][sl] = 0.0
-    return out
 
 
 def ablation(
@@ -64,6 +57,9 @@ def ablation(
     log.log("ablation_start", top_k=len(candidates), heads=heads, total_evals=total)
     print(f"\n[S2] Ablation: {len(candidates)} checkpoints × {len(heads)+1} variants = {total} evals")
 
+    device = _pick_device()
+    preloaded = preload_batches(loader, device)
+
     all_results: list[dict[str, Any]] = []
     pbar = tqdm(total=total, desc="S2 ablation",
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]")
@@ -72,8 +68,11 @@ def ablation(
         ema_state, meta = load_ema(Path(row["path"]))
         base_name = row["name"]
 
-        # Baseline
-        baseline_m = run_eval(ema_state, meta, loader, outer_width=eval_cfg["outer_width"])
+        # Build model ONCE — zero heads in-place and restore, no state_dict cloning needed
+        model = build_model(ema_state, meta, device)
+
+        # Baseline (model unmodified)
+        baseline_m = eval_with_preloaded(model, preloaded, outer_width=eval_cfg["outer_width"])
         baseline_q = quality_score(baseline_m)
         pbar.update(1)
         pbar.set_postfix_str(f"{base_name[:30]} baseline Q={baseline_q:.3f}")
@@ -82,10 +81,23 @@ def ablation(
                                         "baseline_metrics": baseline_m, "heads": {}}
 
         for head in heads:
-            zeroed_state = _zero_head(ema_state, head)
-            m = run_eval(zeroed_state, meta, loader, outer_width=eval_cfg["outer_width"])
+            sl = HEAD_SLICES[head]
+            w_key = "coarse_head.2.weight"
+            b_key = "coarse_head.2.bias"
+            # Save and zero in-place
+            saved_w = model.coarse_head[2].weight.data[sl].clone()
+            saved_b = model.coarse_head[2].bias.data[sl].clone()
+            model.coarse_head[2].weight.data[sl] = 0.0
+            model.coarse_head[2].bias.data[sl] = 0.0
+
+            m = eval_with_preloaded(model, preloaded, outer_width=eval_cfg["outer_width"])
+
+            # Restore original weights
+            model.coarse_head[2].weight.data[sl] = saved_w
+            model.coarse_head[2].bias.data[sl] = saved_b
+
             q = quality_score(m)
-            delta_q = q - baseline_q  # positive = head was helping (removing it made worse)
+            delta_q = q - baseline_q
             deltas = {k: m.get(k, 0.0) - baseline_m.get(k, 0.0) for k in DISPLAY_METRICS}
             ckpt_result["heads"][head] = {
                 "quality_without": q,
@@ -93,12 +105,10 @@ def ablation(
                 "contribution_label": "critical" if delta_q > 5 else "important" if delta_q > 1 else "minor",
                 "metric_deltas": deltas,
             }
-            del zeroed_state
-            free_memory()
             pbar.update(1)
 
         all_results.append(ckpt_result)
-        del ema_state
+        del model, ema_state
         free_memory()
 
     pbar.close()

@@ -4,8 +4,10 @@ from __future__ import annotations
 import pytest
 import torch
 
-from model_surgery.lib.eval_mini import build_model, metrics_summary, quality_score
-from src.models.harmonizer import SeamHarmonizerV3
+from model_surgery.lib.eval_mini import (
+    build_model, cache_coarse_outputs, eval_from_cache, metrics_summary, quality_score,
+)
+from src.models.harmonizer import DEFAULT_CORRECTION_LIMITS, SeamHarmonizerV3
 
 
 @pytest.fixture
@@ -131,3 +133,63 @@ def test_metrics_summary_handles_missing_keys():
     s = metrics_summary({})
     assert "Q=" in s
     assert "nan" in s.lower() or "nan" not in s  # just shouldn't crash
+
+
+# --- cache_coarse_outputs + eval_from_cache ---
+
+def _make_batch(outer_width=128, inner_width=64, height=128, batch=2):
+    total_width = outer_width + inner_width
+    strip = torch.rand(batch, 9, height, total_width)
+    rgb = strip[:, :3]
+    return {
+        "input": strip,
+        "input_rgb": rgb,
+        "target": torch.rand(batch, 3, height, total_width),
+    }
+
+
+def test_cache_coarse_outputs_returns_required_keys(tiny_state, dummy_meta):
+    model = build_model(tiny_state, dummy_meta, torch.device("cpu"))
+    batch = _make_batch()
+    cached = cache_coarse_outputs(model, [batch])
+    assert len(cached) == 1
+    for key in ("gain_lowres", "gamma_lowres", "bias_lowres", "mix_lowres",
+                "detail_lowres", "gate_lowres", "attention_lowres", "x_rgb",
+                "input_rgb", "target"):
+        assert key in cached[0], f"Missing key: {key}"
+
+
+def test_eval_from_cache_returns_metrics(tiny_state, dummy_meta):
+    model = build_model(tiny_state, dummy_meta, torch.device("cpu"))
+    batch = _make_batch()
+    cached = cache_coarse_outputs(model, [batch])
+    limits = dict(DEFAULT_CORRECTION_LIMITS)
+    metrics = eval_from_cache(cached, limits, outer_width=128)
+    assert isinstance(metrics, dict)
+    assert len(metrics) > 0
+    assert "boundary_mae_16" in metrics
+
+
+def test_eval_from_cache_varies_with_limits(tiny_state, dummy_meta):
+    """Different correction limits must produce different metrics."""
+    model = build_model(tiny_state, dummy_meta, torch.device("cpu"))
+    batch = _make_batch()
+    cached = cache_coarse_outputs(model, [batch, _make_batch()])
+
+    limits_a = {**DEFAULT_CORRECTION_LIMITS, "gate_bias": -0.10}
+    limits_b = {**DEFAULT_CORRECTION_LIMITS, "gate_bias": -2.00}
+    ma = eval_from_cache(cached, limits_a, outer_width=128)
+    mb = eval_from_cache(cached, limits_b, outer_width=128)
+    # Heavy negative gate_bias suppresses confidence → different correction → different metrics
+    assert ma != mb
+
+
+def test_cache_coarse_does_not_require_model_after(tiny_state, dummy_meta):
+    """eval_from_cache must work after the model is deleted."""
+    model = build_model(tiny_state, dummy_meta, torch.device("cpu"))
+    batch = _make_batch()
+    cached = cache_coarse_outputs(model, [batch])
+    del model  # free model — cache must be self-contained
+    limits = dict(DEFAULT_CORRECTION_LIMITS)
+    metrics = eval_from_cache(cached, limits, outer_width=128)
+    assert "boundary_mae_16" in metrics

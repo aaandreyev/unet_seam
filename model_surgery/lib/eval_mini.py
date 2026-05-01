@@ -92,18 +92,105 @@ def build_loader(manifest: Path, n_strips: int, outer_width: int, inner_width: i
                       num_workers=0, collate_fn=collate_strip_batch)
 
 
-def run_eval(
-    state_dict: dict[str, torch.Tensor],
-    meta: dict[str, Any],
-    loader: DataLoader,
-    device: torch.device | None = None,
+def preload_batches(loader: DataLoader, device: torch.device) -> list[dict]:
+    """Load all batches to device once and cache them."""
+    batches = []
+    for batch in loader:
+        batches.append({
+            k: v.to(device) if isinstance(v, torch.Tensor) else v
+            for k, v in batch.items()
+        })
+    return batches
+
+
+def cache_coarse_outputs(
+    model: SeamHarmonizerV3,
+    batches: list[dict],
+) -> list[dict]:
+    """Run encoder+decoder+coarse_head ONCE per batch, cache raw low-res outputs.
+
+    For S1 gate/limits search: correction_limits only affect `reconstruct_corrected_strip`,
+    NOT the network weights. So we can run the heavy encoder/decoder once, cache the
+    coarse outputs, then for each parameter combination call only the cheap reconstruction.
+
+    Speedup for S1: ~1000× (5 full forward passes vs 1600 × 5 reconstruction-only calls).
+
+    Returns list of dicts with keys:
+      gain_lowres, gamma_lowres, bias_lowres, mix_lowres, detail_lowres, gate_lowres,
+      attention_lowres, x_rgb (input strip RGB), input_rgb, target
+    """
+    from src.models.harmonizer import SeamHarmonizerV3 as _H
+    cached: list[dict] = []
+    with torch.inference_mode():
+        for batch in batches:
+            x = batch["input"]
+            # Run full forward to get coarse outputs
+            out = model(x)
+            cached.append({
+                # Raw coarse outputs (small tensors, cheap to store)
+                "gain_lowres":     out["gain_lowres"].clone(),
+                "gamma_lowres":    out["gamma_lowres"].clone(),
+                "bias_lowres":     out["bias_lowres"].clone(),
+                "mix_lowres":      out["mix_lowres"].clone(),
+                "detail_lowres":   out["detail_lowres"].clone(),
+                "gate_lowres":     out["gate_lowres"].clone(),
+                "attention_lowres":out["attention_lowres"].clone(),
+                # Full-res data needed for metrics
+                "x_rgb":      x[:, :3].clone(),
+                "input_rgb":  batch["input_rgb"],
+                "target":     batch["target"],
+            })
+    return cached
+
+
+def eval_from_cache(
+    cached: list[dict],
+    correction_limits: dict[str, float],
     outer_width: int = 128,
 ) -> dict[str, float]:
-    """Run eval on loader, return metric dict. Frees model from device after."""
-    if device is None:
-        device = _pick_device()
-    model = build_model(state_dict, meta, device)
-    loss_computer = HarmonizerLossComputer(outer_width=outer_width)
+    """Eval using cached coarse outputs — runs only reconstruction, no encoder/decoder.
+
+    Call cache_coarse_outputs() first to build the cache.
+    correction_limits must include all keys accepted by reconstruct_corrected_strip:
+      gain_limit, gamma_limit, bias_limit, mix_limit, detail_limit, gate_bias.
+
+    Speedup for S1 vs eval_with_preloaded: ~100-1000× — reconstruction only,
+    no encoder/decoder forward.
+    """
+    from src.models.harmonizer import reconstruct_corrected_strip
+    agg: dict[str, float] = {}
+    steps = 0
+    with torch.inference_mode():
+        for entry in cached:
+            lowres = {
+                "gain_lowres":   entry["gain_lowres"],
+                "gamma_lowres":  entry["gamma_lowres"],
+                "bias_lowres":   entry["bias_lowres"],
+                "mix_lowres":    entry["mix_lowres"],
+                "detail_lowres": entry["detail_lowres"],
+                "gate_lowres":   entry["gate_lowres"],
+            }
+            recon = reconstruct_corrected_strip(
+                entry["x_rgb"], lowres, outer_width=outer_width, **correction_limits
+            )
+            out_for_metrics = {**recon, "attention_lowres": entry["attention_lowres"]}
+            m = evaluate_harmonizer_batch(
+                recon["corrected_strip"], entry["input_rgb"], entry["target"],
+                out_for_metrics, outer_width=outer_width,
+            )
+            for k, v in m.items():
+                agg[k] = agg.get(k, 0.0) + float(v)
+            steps += 1
+    return {k: v / steps for k, v in agg.items()} if steps > 0 else {}
+
+
+def eval_with_model(
+    model: SeamHarmonizerV3,
+    loader: DataLoader,
+    device: torch.device,
+    outer_width: int = 128,
+) -> dict[str, float]:
+    """Run eval on an already-built model. Does NOT free the model — caller owns it."""
     agg: dict[str, float] = {}
     steps = 0
     with torch.inference_mode():
@@ -118,9 +205,49 @@ def run_eval(
             for k, v in m.items():
                 agg[k] = agg.get(k, 0.0) + float(v)
             steps += 1
+    return {k: v / steps for k, v in agg.items()} if steps > 0 else {}
+
+
+def eval_with_preloaded(
+    model: SeamHarmonizerV3,
+    batches: list[dict],
+    outer_width: int = 128,
+) -> dict[str, float]:
+    """Eval on pre-loaded device batches — zero H→D transfer cost.
+
+    Use inside tight loops where the same dataset is evaluated many times
+    (S1 gate search, S2 ablation inner loop).
+    """
+    agg: dict[str, float] = {}
+    steps = 0
+    with torch.inference_mode():
+        for batch in batches:
+            out = model(batch["input"])
+            m = evaluate_harmonizer_batch(
+                out["corrected_strip"], batch["input_rgb"], batch["target"], out,
+                outer_width=outer_width,
+            )
+            for k, v in m.items():
+                agg[k] = agg.get(k, 0.0) + float(v)
+            steps += 1
+    return {k: v / steps for k, v in agg.items()} if steps > 0 else {}
+
+
+def run_eval(
+    state_dict: dict[str, torch.Tensor],
+    meta: dict[str, Any],
+    loader: DataLoader,
+    device: torch.device | None = None,
+    outer_width: int = 128,
+) -> dict[str, float]:
+    """Build model, run eval, free model. Use when each eval has a different state_dict."""
+    if device is None:
+        device = _pick_device()
+    model = build_model(state_dict, meta, device)
+    result = eval_with_model(model, loader, device, outer_width)
     del model
     free_memory()
-    return {k: v / steps for k, v in agg.items()} if steps > 0 else {}
+    return result
 
 
 def quality_score(metrics: dict[str, float]) -> float:
