@@ -27,7 +27,7 @@ class SeamHarmonizerV3Node:
                 "MASK": ("MASK",),
                 "model_path": ("STRING", {"default": default_model}),
                 "inner_width": ("INT", {"default": 128}),
-                "inner_falloff_px": ("INT", {"default": 48, "min": 0, "max": 512, "step": 1}),
+                "inner_falloff_px": ("INT", {"default": 128, "min": 0, "max": 1024, "step": 1}),
                 "strength": ("FLOAT", {"default": 1.0}),
                 "process_left": ("BOOLEAN", {"default": True}),
                 "process_right": ("BOOLEAN", {"default": True}),
@@ -104,7 +104,7 @@ class SeamHarmonizerV3Node:
             sides,
             inner_width,
             strength,
-            inner_falloff_px or None,
+            int(inner_falloff_px) if inner_falloff_px > 0 else None,
         )
         if debug_previews:
             self._write_debug(debug, image, corrected, extra={**base_meta, "sides": sides})
