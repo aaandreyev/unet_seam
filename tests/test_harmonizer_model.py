@@ -98,4 +98,7 @@ def test_harmonizer_loss_is_finite():
         out = model(x)
     losses = HarmonizerLossComputer()(out, batch)
     assert "total" in losses
+    assert "l_attn" in losses
+    assert "l_conf_metric" not in losses
+    assert "l_conf_budget" not in losses
     assert all(torch.isfinite(value).all() for value in losses.values())

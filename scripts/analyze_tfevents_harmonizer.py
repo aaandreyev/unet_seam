@@ -19,7 +19,8 @@ from typing import Any
 
 import yaml
 
-# Default loss weights (HarmonizerLossComputer) for contribution estimates
+# Default loss weights (HarmonizerLossComputer stage8+) for contribution estimates.
+# conf_align / conf_metric / conf_budget removed in stage8; attn added.
 _DEFAULT_LOSS_WEIGHTS: dict[str, float] = {
     "rec": 0.8,
     "seam": 1.3,
@@ -29,9 +30,7 @@ _DEFAULT_LOSS_WEIGHTS: dict[str, float] = {
     "stats": 0.35,
     "lab": 0.8,
     "profile": 0.55,
-    "conf_align": 0.18,
-    "conf_metric": 1.0e-8,
-    "conf_budget": 1.0e-8,
+    "attn": 0.20,
     "overcorr": 0.22,
     "gate": 0.03,
     "field": 0.10,
@@ -128,6 +127,8 @@ def _table_val_epochs(
             "l_stats",
             "l_lab",
             "l_profile",
+            "l_attn",
+            # legacy terms kept for backward-compat with pre-stage8 tfevents:
             "l_conf_align",
             "l_conf_metric",
             "l_conf_budget",
@@ -209,6 +210,8 @@ def _weighted_loss_breakdown_at_step(
         "l_stats": "stats",
         "l_lab": "lab",
         "l_profile": "profile",
+        "l_attn": "attn",
+        # legacy pre-stage8 terms — present in old tfevents, absent in new:
         "l_conf_align": "conf_align",
         "l_conf_metric": "conf_metric",
         "l_conf_budget": "conf_budget",

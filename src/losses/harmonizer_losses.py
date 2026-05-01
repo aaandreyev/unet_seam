@@ -84,20 +84,27 @@ def _profile_loss(
     return row_loss + 0.5 * grad_loss
 
 
-def _confidence_target_map(
+def _attention_target_map(
     input_inner: torch.Tensor,
     target: torch.Tensor,
     seam_weight: torch.Tensor,
     *,
     sigma: float,
 ) -> torch.Tensor:
+    """Supervision target for the decoupled attention head ("where to act").
+
+    Normalized by the 85th-percentile of per-sample error, floored near the seam.
+    Crucially this is NOT applied to the gate/confidence (which controls amplitude)
+    — that decoupling is the whole point of the two-head design.
+    """
     delta = gaussian_blur_tensor((target - input_inner).abs(), sigma).mean(dim=1, keepdim=True)
-    # torch.quantile on CUDA requires float32/float64; bf16/fp16 training hits this path in Colab.
+    # torch.quantile requires float32/float64; bf16/fp16 training hits this path in Colab.
     delta_quant = delta.float() if delta.dtype not in (torch.float32, torch.float64) else delta
     norm = torch.quantile(delta_quant.flatten(start_dim=1), 0.85, dim=1, keepdim=True).view(-1, 1, 1, 1).clamp_min(0.03)
     norm = norm.to(device=delta.device, dtype=delta.dtype)
-    target_conf = (delta / norm).clamp(0.0, 1.0)
-    return torch.maximum(target_conf, 0.15 * seam_weight)
+    target_attn = (delta / norm).clamp(0.0, 1.0)
+    # Near-seam floor: attention should stay active at the boundary even for small errors.
+    return torch.maximum(target_attn, 0.10 * seam_weight)
 
 
 def _srgb_to_linear(x: torch.Tensor) -> torch.Tensor:
@@ -148,9 +155,7 @@ class HarmonizerLossComputer:
             "matrix": 0.10,
             "lab": 0.80,
             "profile": 0.55,
-            "conf_align": 0.18,
-            "conf_metric": 1.0e-8,
-            "conf_budget": 1.0e-8,
+            "attn": 0.20,
             "overcorr": 0.22,
             "gain_reg": 1.0e-8,
         }
@@ -210,14 +215,16 @@ class HarmonizerLossComputer:
         lab_err = (lab_pred - lab_target).abs().mean(dim=1, keepdim=True)
         l_lab = 0.65 * _masked_mean(lab_err, seam_weight) + 0.35 * (lab_low_pred - lab_low_target).abs().mean()
         l_profile = _profile_loss(pred, target, input_inner, seam_weight, sigma=max(self.low_sigma, 7.0))
-        target_conf = _confidence_target_map(input_inner, target, seam_weight, sigma=max(self.low_sigma, 5.0))
-        conf_err = charbonnier(outputs["confidence"] - target_conf)
-        l_conf_align = 0.8 * _masked_mean(conf_err, seam_weight) + 0.2 * _masked_mean(conf_err, inner_weight)
-        metric_target_conf = ((target - input_inner).abs().mean(dim=1, keepdim=True) / 0.08).clamp(0.0, 1.0)
-        conf_metric_err = charbonnier(outputs["confidence"] - metric_target_conf)
-        l_conf_metric = 0.35 * _masked_mean(conf_metric_err, seam_weight) + 0.65 * _masked_mean(conf_metric_err, full_mask)
-        sample_conf_mean = outputs["confidence"].mean(dim=(-2, -1), keepdim=True)
-        l_conf_budget = F.relu(sample_conf_mean - 0.24).mean()
+        # Attention head: supervision for "where to act" (decoupled from gate/amplitude).
+        # attention_lowres lives at coarse spatial resolution; upsample to inner size first.
+        attn_lowres = outputs.get("attention_lowres")
+        if attn_lowres is not None:
+            attn_full = F.interpolate(attn_lowres, size=target.shape[-2:], mode="bilinear", align_corners=False)
+            target_attn = _attention_target_map(input_inner, target, seam_weight, sigma=max(self.low_sigma, 5.0))
+            attn_err = charbonnier(attn_full - target_attn)
+            l_attn = 0.8 * _masked_mean(attn_err, seam_weight) + 0.2 * _masked_mean(attn_err, inner_weight)
+        else:
+            l_attn = pred.new_zeros(())
         delta_pred_mag = gaussian_blur_tensor((pred - input_inner).abs(), self.low_sigma).mean(dim=1, keepdim=True)
         delta_target_mag = gaussian_blur_tensor((target - input_inner).abs(), self.low_sigma).mean(dim=1, keepdim=True)
         overcorr_map = (delta_pred_mag - delta_target_mag).clamp_min(0.0)
@@ -252,9 +259,7 @@ class HarmonizerLossComputer:
             + w["stats"] * l_stats
             + w["lab"] * l_lab
             + w["profile"] * l_profile
-            + w["conf_align"] * l_conf_align
-            + w["conf_metric"] * l_conf_metric
-            + w["conf_budget"] * l_conf_budget
+            + w["attn"] * l_attn
             + w["overcorr"] * l_overcorr
             + w["gate"] * l_gate
             + w["field"] * l_field
@@ -272,9 +277,7 @@ class HarmonizerLossComputer:
             "l_stats": l_stats,
             "l_lab": l_lab,
             "l_profile": l_profile,
-            "l_conf_align": l_conf_align,
-            "l_conf_metric": l_conf_metric,
-            "l_conf_budget": l_conf_budget,
+            "l_attn": l_attn,
             "l_overcorr": l_overcorr,
             "l_gate": l_gate,
             "l_field": l_field,

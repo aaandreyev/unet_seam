@@ -141,9 +141,7 @@ class TestLossAndMetrics:
             "l_stats",
             "l_lab",
             "l_profile",
-            "l_conf_align",
-            "l_conf_metric",
-            "l_conf_budget",
+            "l_attn",
             "l_overcorr",
             "l_gate",
             "l_field",
@@ -152,6 +150,9 @@ class TestLossAndMetrics:
             "l_gain_reg",
         }
         assert expected.issubset(losses.keys())
+        # conf_metric and conf_budget were removed — gate alone handles confidence budget.
+        assert "l_conf_metric" not in losses, "l_conf_metric was removed in stage8 loss redesign"
+        assert "l_conf_budget" not in losses, "l_conf_budget was removed in stage8 loss redesign"
 
     def test_metrics_finite(self, model, train_ds, gpu_corruption):
         batch = _corrupted_batch(collate_strip_batch([train_ds[0], train_ds[1]]), gpu_corruption)

@@ -39,12 +39,18 @@ def test_spec_input_channels_mask_distance_and_aux_maps():
 
 def test_spec_loss_weights():
     loss = HarmonizerLossComputer()
-    required = {"rec", "seam", "low", "grad", "chroma", "stats", "gate", "field", "detail", "matrix", "lab", "profile", "conf_align", "overcorr"}
+    required = {"rec", "seam", "low", "grad", "chroma", "stats", "gate", "field", "detail", "matrix", "lab", "profile", "attn", "overcorr"}
     assert required.issubset(loss.weights.keys())
-    assert all(v > 0 for v in loss.weights.values())
+    # gain_reg is allowed to be near-zero (regulariser off by default)
+    assert all(v >= 0 for v in loss.weights.values())
+    assert all(v > 0 for k, v in loss.weights.items() if k != "gain_reg")
     # Spot-check that key perceptual terms are reasonably weighted.
     assert loss.weights["lab"] >= 0.4
     assert loss.weights["seam"] >= 1.0
+    # conf_metric and conf_budget removed in stage8 redesign.
+    assert "conf_align" not in loss.weights
+    assert "conf_metric" not in loss.weights
+    assert "conf_budget" not in loss.weights
     assert loss.weights["profile"] >= 0.3
     if False:  # kept for reference, not enforced so weights can be tuned freely
         _ = {

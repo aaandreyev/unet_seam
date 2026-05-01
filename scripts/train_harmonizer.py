@@ -49,6 +49,16 @@ def _assert_batch_within_cuda_index_limit(
 
 
 def _quality(metrics: dict[str, float]) -> float:
+    """Lower is better. Seam metrics dominate; risk penalties are secondary guards.
+
+    Changes from stage7:
+    - ΔE weight 2.2→4.5, mae weight 170→220: seam quality now clearly dominates.
+    - Dropped conf_high (was a duplicate of conf_excess at a higher threshold).
+    - conf_excess penalty 85→25: confidence is now supervised via attention head,
+      not the gate; punishing high gate-confidence directly was counterproductive.
+    - detail_excess 180→60, gain_excess 75→20: stage7 over-squeezed amplitude.
+    - Added "undercorrection" guard: penalise if rel_mae < 15% (model doing nothing).
+    """
     de = metrics.get("boundary_ciede2000_16", float("inf"))
     base = metrics.get("baseline_boundary_ciede2000_16", de)
     mae = metrics.get("boundary_mae_16", 1.0)
@@ -65,24 +75,24 @@ def _quality(metrics: dict[str, float]) -> float:
     rel_mae = max((1.0 - mae / max(base_mae, 1e-6)) * 100.0, 0.0)
     de_gate_deficit = max(40.0 - rel_de, 0.0)
     mae_gate_deficit = max(50.0 - rel_mae, 0.0)
-    conf_excess = max(conf_mean - 0.22, 0.0)
-    conf_high = max(conf_mean - 0.40, 0.0)
-    detail_excess = max(detail_abs - 0.0045, 0.0)
-    gain_excess = max(gain_abs - 0.05, 0.0)
+    conf_excess = max(conf_mean - 0.30, 0.0)
+    detail_excess = max(detail_abs - 0.006, 0.0)
+    gain_excess = max(gain_abs - 0.08, 0.0)
+    undercorrection = max(15.0 - rel_mae, 0.0)
     return (
-        2.2 * de
-        + 170.0 * mae
+        4.5 * de
+        + 220.0 * mae
         + 85.0 * low
         + 95.0 * delta_luma_profile
         + 60.0 * delta_chroma_profile
         + 120.0 * overcorr
         + 14.0 * conf_align
-        + 85.0 * conf_excess
-        + 120.0 * conf_high
-        + 180.0 * detail_excess
-        + 75.0 * gain_excess
+        + 25.0 * conf_excess
+        + 60.0 * detail_excess
+        + 20.0 * gain_excess
         + 0.8 * de_gate_deficit
         + 0.2 * mae_gate_deficit
+        + 1.5 * undercorrection
     )
 
 
