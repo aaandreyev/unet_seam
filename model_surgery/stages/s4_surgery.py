@@ -38,12 +38,14 @@ def surgery(
     bases = survey_rows[:top_k_base]
     donors = survey_rows[:top_k_donors]
 
+    mat_dir = Path(eval_cfg["materialized_dir"]) if eval_cfg.get("materialized_dir") else None
     loader = build_loader(
         manifest=Path(cfg["manifest"]),
         n_strips=eval_cfg["mini_strips"],
         outer_width=eval_cfg["outer_width"], inner_width=eval_cfg["inner_width"],
         strip_height=eval_cfg["strip_height"], boundary_band_px=eval_cfg["boundary_band_px"],
         batch_size=eval_cfg["batch_size"], seed=eval_cfg["seed"],
+        materialized_dir=mat_dir,
     )
 
     combos = [

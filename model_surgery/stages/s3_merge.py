@@ -36,12 +36,14 @@ def merge(
     sel_heads = s_cfg["selective_heads"]
     candidates = survey_rows[:top_k]
 
+    mat_dir = Path(eval_cfg["materialized_dir"]) if eval_cfg.get("materialized_dir") else None
     loader = build_loader(
         manifest=Path(cfg["manifest"]),
         n_strips=eval_cfg["mini_strips"],
         outer_width=eval_cfg["outer_width"], inner_width=eval_cfg["inner_width"],
         strip_height=eval_cfg["strip_height"], boundary_band_px=eval_cfg["boundary_band_px"],
         batch_size=eval_cfg["batch_size"], seed=eval_cfg["seed"],
+        materialized_dir=mat_dir,
     )
 
     pairs = [(i, j) for i, j in itertools.combinations(range(len(candidates)), 2)]

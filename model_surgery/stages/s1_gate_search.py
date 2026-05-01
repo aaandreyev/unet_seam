@@ -60,6 +60,7 @@ def gate_search(
     s_cfg = cfg["s1_gate_search"]
     eval_cfg = cfg["eval"]
 
+    mat_dir = Path(eval_cfg["materialized_dir"]) if eval_cfg.get("materialized_dir") else None
     loader = build_loader(
         manifest=Path(cfg["manifest"]),
         n_strips=eval_cfg["mini_strips"],
@@ -69,6 +70,7 @@ def gate_search(
         boundary_band_px=eval_cfg["boundary_band_px"],
         batch_size=eval_cfg["batch_size"],
         seed=eval_cfg["seed"],
+        materialized_dir=mat_dir,
     )
 
     gate_biases = _gate_bias_grid(s_cfg)
