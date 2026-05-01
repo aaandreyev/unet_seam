@@ -60,6 +60,7 @@ def apply_corrector_to_full_frame(
     sides: list[str],
     inner_width: int,
     strength: float = 1.0,
+    blend_falloff_px: int | None = None,
 ) -> tuple[torch.Tensor, dict]:
     outputs = extract_active_strips(image[0], bbox, sides, inner_width)
     side_deltas: dict[str, torch.Tensor] = {}
@@ -102,8 +103,9 @@ def apply_corrector_to_full_frame(
         side_confidences=side_confidences,
         bbox=bbox,
         inner_width=inner_width,
+        blend_falloff_px=blend_falloff_px,
     )
-    corrected = image + merged * strength
+    corrected = (image + merged * strength).clamp(0.0, 1.0)
     corrected = corrected * mask + image * (1.0 - mask)
     debug["weights"] = weights
     debug["side_deltas"] = side_deltas

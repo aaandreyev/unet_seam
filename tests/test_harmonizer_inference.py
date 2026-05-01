@@ -68,7 +68,9 @@ def test_harmonizer_accepts_unbounded_strength_values():
     bbox = (128, 128, 384, 384)
     out, _ = apply_corrector_to_full_frame(AddInnerModel(delta=0.1, confidence=1.0), image, mask, bbox, ["left"], 128, strength=12.0)
     assert out.shape == image.shape
-    assert float(out[:, :, 128:384, 128:256].mean()) > 1.0
+    # Output is clamped to [0, 1]; high strength saturates the seam zone to 1.0.
+    assert float(out.max()) <= 1.0
+    assert float(out[:, :, 128:384, 128:256].mean()) > 0.5
 
 
 def test_zero_confidence_suppresses_side_contribution():
