@@ -6,7 +6,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from model_surgery.lib.eval_mini import (
-    ReusableModelEvaluator, _infer_channels_blocks, build_model,
+    ReusableModelEvaluator, _infer_architecture_from_state_dict, _normalize_legacy_state_dict, build_model,
     cache_coarse_outputs, eval_from_cache, eval_with_preloaded_fast,
     metrics_summary, quality_score, run_eval,
 )
@@ -155,7 +155,8 @@ def test_quality_score_no_nan_empty():
 # --- architecture inference ---
 
 def test_infer_channels_blocks_from_state_dict(tiny_state):
-    ch, bl = _infer_channels_blocks(tiny_state)
+    in_ch, ch, bl = _infer_architecture_from_state_dict(tiny_state)
+    assert in_ch == 9
     assert ch == (8, 12, 16, 24)
     assert len(bl) == 4
     assert all(b >= 1 for b in bl)
@@ -172,6 +173,34 @@ def test_build_model_with_wrong_meta_channels_falls_back(tiny_state):
     # tiny_state has channels=(8,12,16,24) but meta says (32,64,128,192) → size mismatch
     model = build_model(tiny_state, meta_wrong, torch.device("cpu"))
     assert model.channels == (8, 12, 16, 24)
+
+
+def test_build_model_with_legacy_norm_shapes_and_wrong_meta_recovers(tiny_state):
+    legacy_state = {}
+    for key, value in tiny_state.items():
+        if key.endswith((".beta", ".gamma", ".norm1.weight", ".norm1.bias", ".norm2.weight", ".norm2.bias")):
+            legacy_state[key] = value.view(1, -1, 1, 1)
+        else:
+            legacy_state[key] = value
+    legacy_state["encoder.stem.weight"] = torch.randn(8, 5, 3, 3)
+    meta_wrong = {
+        "config": {
+            "model": {"in_channels": 9, "channels": [32, 64, 128, 192], "blocks": [2, 2, 4, 6]},
+            "dataset": {"outer_width": 128, "boundary_band_px": 24},
+        }
+    }
+    model = build_model(legacy_state, meta_wrong, torch.device("cpu"))
+    assert model.in_channels == 5
+    assert model.channels == (8, 12, 16, 24)
+    assert model.blocks == (1, 1, 1, 1)
+
+
+def test_normalize_legacy_state_dict_squeezes_layernorm_like_params(tiny_state):
+    key = "encoder.stages.0.0.norm1.weight"
+    legacy = dict(tiny_state)
+    legacy[key] = tiny_state[key].view(1, -1, 1, 1)
+    normalized = _normalize_legacy_state_dict(legacy)
+    assert normalized[key].shape == tiny_state[key].shape
 
 
 # --- cache_coarse_outputs + eval_from_cache ---

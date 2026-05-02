@@ -41,31 +41,73 @@ def _optimize_runtime(device: torch.device) -> None:
         torch.set_float32_matmul_precision("high")
 
 
-def _infer_channels_blocks(
-    state_dict: dict[str, torch.Tensor],
-) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """Infer (channels, blocks) from state_dict key shapes.
+def _channel_count_from_tensor(t: torch.Tensor) -> int:
+    if t.ndim == 1:
+        return int(t.shape[0])
+    if t.ndim == 4 and t.shape[0] == 1 and t.shape[2:] == (1, 1):
+        return int(t.shape[1])
+    return int(t.numel())
 
-    Reads encoder.stages.{level}.{block}.norm1.weight — works for NAFEncoderLite.
-    Falls back to empty tuples if the expected keys are absent.
+
+def _infer_architecture_from_state_dict(
+    state_dict: dict[str, torch.Tensor],
+) -> tuple[int | None, tuple[int, ...], tuple[int, ...]]:
+    """Infer (in_channels, channels, blocks) from state_dict key shapes.
+
+    Supports both current parameter shapes (`beta` as `[C]`) and older legacy
+    checkpoints where normalization/beta/gamma tensors were saved as `[1, C, 1, 1]`.
     """
+    in_channels = None
+    stem_key = "encoder.stem.weight"
+    if stem_key in state_dict and state_dict[stem_key].ndim >= 2:
+        in_channels = int(state_dict[stem_key].shape[1])
+
     channels: list[int] = []
     blocks: list[int] = []
     for level in range(10):
-        k = f"encoder.stages.{level}.0.norm1.weight"
-        if k not in state_dict:
+        beta_key = f"encoder.stages.{level}.0.beta"
+        norm_key = f"encoder.stages.{level}.0.norm1.weight"
+        key = beta_key if beta_key in state_dict else norm_key
+        if key not in state_dict:
             break
-        channels.append(int(state_dict[k].shape[0]))
+        channels.append(_channel_count_from_tensor(state_dict[key]))
         n = 1
-        while f"encoder.stages.{level}.{n}.norm1.weight" in state_dict:
+        while (
+            f"encoder.stages.{level}.{n}.beta" in state_dict
+            or f"encoder.stages.{level}.{n}.norm1.weight" in state_dict
+        ):
             n += 1
         blocks.append(n)
-    return tuple(channels), tuple(blocks)
+    return in_channels, tuple(channels), tuple(blocks)
+
+
+def _normalize_legacy_state_dict(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    normalized: dict[str, torch.Tensor] = {}
+    squeeze_suffixes = (
+        ".beta",
+        ".gamma",
+        ".norm1.weight",
+        ".norm1.bias",
+        ".norm2.weight",
+        ".norm2.bias",
+    )
+    for key, value in state_dict.items():
+        tensor = value
+        if (
+            key.endswith(squeeze_suffixes)
+            and tensor.ndim == 4
+            and tensor.shape[0] == 1
+            and tensor.shape[2:] == (1, 1)
+        ):
+            tensor = tensor.reshape(-1)
+        normalized[key] = tensor
+    return normalized
 
 
 def build_model(state_dict: dict[str, torch.Tensor], meta: dict[str, Any],
                 device: torch.device) -> SeamHarmonizerV3:
     _optimize_runtime(device)
+    state_dict = _normalize_legacy_state_dict(state_dict)
     cfg = meta.get("config") or {}
     mcfg = cfg.get("model") or {}
     dcfg = cfg.get("dataset") or {}
@@ -90,13 +132,15 @@ def build_model(state_dict: dict[str, torch.Tensor], meta: dict[str, Any],
         if "size mismatch" not in str(e):
             raise
         # Infer architecture from state_dict and retry
-        inf_ch, inf_bl = _infer_channels_blocks(state_dict)
+        inf_in_channels, inf_ch, inf_bl = _infer_architecture_from_state_dict(state_dict)
         if not inf_ch:
             raise RuntimeError(
                 f"Cannot infer architecture from state_dict (size mismatch): {e}"
             ) from e
+        if inf_in_channels is not None:
+            in_channels = inf_in_channels
         print(f"[build_model] size mismatch with meta channels={channels} — "
-              f"inferred channels={inf_ch}, blocks={inf_bl}")
+              f"inferred in_channels={in_channels}, channels={inf_ch}, blocks={inf_bl}")
         model = _make(inf_ch, inf_bl)
         result = model.load_state_dict(state_dict, strict=False)
 
@@ -109,6 +153,7 @@ def build_model(state_dict: dict[str, torch.Tensor], meta: dict[str, Any],
 
 
 def _model_signature(state_dict: dict[str, torch.Tensor], meta: dict[str, Any]) -> tuple:
+    state_dict = _normalize_legacy_state_dict(state_dict)
     cfg = meta.get("config") or {}
     mcfg = cfg.get("model") or {}
     dcfg = cfg.get("dataset") or {}
@@ -117,9 +162,11 @@ def _model_signature(state_dict: dict[str, torch.Tensor], meta: dict[str, Any]) 
     blocks = tuple(mcfg.get("blocks", [2, 2, 4, 6]))
     outer_width = int(dcfg.get("outer_width", 128))
     boundary_band = int(dcfg.get("boundary_band_px", 24))
-    if "encoder.stages.0.0.norm1.weight" in state_dict:
-        inferred_channels, inferred_blocks = _infer_channels_blocks(state_dict)
+    if "encoder.stages.0.0.norm1.weight" in state_dict or "encoder.stages.0.0.beta" in state_dict:
+        inferred_in_channels, inferred_channels, inferred_blocks = _infer_architecture_from_state_dict(state_dict)
         if inferred_channels:
+            if inferred_in_channels is not None:
+                in_channels = inferred_in_channels
             channels, blocks = inferred_channels, inferred_blocks
     return in_channels, channels, blocks, outer_width, boundary_band
 
@@ -405,6 +452,7 @@ class ReusableModelEvaluator:
         self._models: dict[tuple, SeamHarmonizerV3] = {}
 
     def _get_model(self, state_dict: dict[str, torch.Tensor], meta: dict[str, Any]) -> SeamHarmonizerV3:
+        state_dict = _normalize_legacy_state_dict(state_dict)
         sig = _model_signature(state_dict, meta)
         model = self._models.get(sig)
         correction_limits = (meta.get("config") or {}).get("model", {}).get("correction_limits")
