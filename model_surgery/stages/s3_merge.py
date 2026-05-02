@@ -73,6 +73,7 @@ def merge(
     best_state: dict | None = None
     best_meta: dict | None = None
     best_result: dict | None = None
+    baseline_q = float(survey_rows[0].get("quality_score") or float("inf"))
 
     pbar = tqdm(total=total, desc="S3 merge",
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]")
@@ -178,10 +179,19 @@ def merge(
     }, out_dir / "s3_merge.json")
 
     if best_state is not None and best_meta is not None:
-        save_surgery_checkpoint(best_state, best_meta, out_dir / "s3_best.pt")
+        improved = best_q < baseline_q
+        if improved:
+            save_surgery_checkpoint(best_state, best_meta, out_dir / "s3_best.pt")
+        else:
+            print(
+                f"\n[S3] Best merge is worse than baseline "
+                f"(stage Q={best_q:.3f} vs baseline Q={baseline_q:.3f}); not saving s3_best.pt"
+            )
         del best_state
         free_memory()
-        log.log("merge_done", best_quality=best_q, best=best_result)
-        print(f"\n[S3] Best merge: {best_result}")
+        log.log("merge_done", best_quality=best_q, baseline_quality=baseline_q,
+                improved=improved, best=best_result)
+        verdict = "IMPROVED" if improved else "worse_than_baseline"
+        print(f"\n[S3] Best merge [{verdict}]: {best_result}")
 
     return all_results

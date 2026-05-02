@@ -87,6 +87,7 @@ def gate_search(
     best_q = float("inf")
     best_result: dict[str, Any] | None = None
     best_limits: dict[str, float] | None = None
+    baseline_q = float(survey_rows[0].get("quality_score") or float("inf"))
 
     pbar = tqdm(total=total_evals, desc="S1 param search",
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]")
@@ -160,17 +161,26 @@ def gate_search(
         free_memory()
         print(f"[S1] Full Q={full_q:.3f}  {metrics_summary(full_metrics)}")
 
-        # Bake best limits into meta and save
-        cl = best_meta.setdefault("config", {}).setdefault("model", {}).setdefault("correction_limits", {})
-        cl.update(best_limits)
-        save_surgery_checkpoint(ema_state, best_meta, out_dir / "s1_best.pt")
+        improved = full_q < baseline_q
+        if improved:
+            # Bake best limits into meta and save only if the stage truly beats the survey baseline.
+            cl = best_meta.setdefault("config", {}).setdefault("model", {}).setdefault("correction_limits", {})
+            cl.update(best_limits)
+            save_surgery_checkpoint(ema_state, best_meta, out_dir / "s1_best.pt")
+        else:
+            print(
+                f"[S1] Best candidate is still worse than baseline "
+                f"(stage Q={full_q:.3f} vs baseline Q={baseline_q:.3f}); not saving s1_best.pt"
+            )
         del ema_state
         free_memory()
         log.log("gate_search_done", best_quality=full_q, proxy_quality=best_q,
+                baseline_quality=baseline_q, improved=improved,
                 best=best_result, best_limits=best_limits, full_metrics=full_metrics)
+        verdict = "IMPROVED" if improved else "worse_than_baseline"
         print(f"\n[S1] Best: {best_result['base']} "
               f"gate_delta={best_result['gate_bias_delta']:.3f} "
               f"gain={best_limits['gain_limit']:.2f} "
-              f"detail={best_limits['detail_limit']:.2f}  Q(full)={full_q:.3f}")
+              f"detail={best_limits['detail_limit']:.2f}  Q(full)={full_q:.3f}  [{verdict}]")
 
     return all_results

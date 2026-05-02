@@ -37,14 +37,16 @@ def test_config_s1_has_grid_params(cfg):
     s1 = cfg["s1_gate_search"]
     assert "gate_bias_range" in s1
     assert len(s1["gate_bias_range"]) == 2
-    # gate_bias range goes from least-negative to most-negative: [-0.05, -1.60]
-    # so start > end (both negative); just verify they differ and range is at least 0.5
     lo, hi = s1["gate_bias_range"]
     assert lo != hi, "gate_bias_range start and end must differ"
-    assert abs(hi - lo) >= 0.5, "gate_bias_range should span at least 0.5"
+    assert abs(hi - lo) <= 0.5, "gate_bias_range should stay narrow around baseline"
     assert s1["n_points"] > 0
     assert "gain_limit_range" in s1
     assert "detail_limit_range" in s1
+    gl_lo, gl_hi = s1["gain_limit_range"]
+    dl_lo, dl_hi = s1["detail_limit_range"]
+    assert (gl_hi - gl_lo) <= 0.6, "gain_limit_range should stay local"
+    assert (dl_hi - dl_lo) <= 0.15, "detail_limit_range should stay local"
 
 
 def test_config_s5_cycle_has_required_keys(cfg):

@@ -74,6 +74,7 @@ def surgery(
     best_state: dict | None = None
     best_meta: dict | None = None
     best_result: dict | None = None
+    baseline_q = float(survey_rows[0].get("quality_score") or float("inf"))
 
     pbar = tqdm(total=total, desc="S4 surgery",
                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]")
@@ -155,11 +156,20 @@ def surgery(
     }, out_dir / "s4_surgery.json")
 
     if best_state is not None and best_meta is not None:
-        save_surgery_checkpoint(best_state, best_meta, out_dir / "s4_best.pt")
+        improved = best_q < baseline_q
+        if improved:
+            save_surgery_checkpoint(best_state, best_meta, out_dir / "s4_best.pt")
+        else:
+            print(
+                f"\n[S4] Best surgery is worse than baseline "
+                f"(stage Q={best_q:.3f} vs baseline Q={baseline_q:.3f}); not saving s4_best.pt"
+            )
         del best_state
         free_memory()
-        log.log("surgery_done", best_quality=best_q, best=best_result)
-        print(f"\n[S4] Best surgery: head={best_result['head']} "
+        log.log("surgery_done", best_quality=best_q, baseline_quality=baseline_q,
+                improved=improved, best=best_result)
+        verdict = "IMPROVED" if improved else "worse_than_baseline"
+        print(f"\n[S4] Best surgery [{verdict}]: head={best_result['head']} "
               f"base={best_result['base']} donor={best_result['donor']} Q={best_q:.3f}")
 
     return all_results
