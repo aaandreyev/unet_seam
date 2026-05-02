@@ -15,7 +15,7 @@ import torch
 from tqdm import tqdm
 
 from model_surgery.lib.checkpoint_io import free_memory, load_ema
-from model_surgery.lib.eval_mini import quality_score
+from model_surgery.lib.eval_mini import ReusableModelEvaluator, _pick_device, build_loader, preload_batches, quality_score
 from model_surgery.lib.reporting import METRIC_COLS, RunLog, comparison_table, save_csv, save_json
 
 
@@ -30,6 +30,7 @@ def _parse_eval_summary(run_dir: Path) -> dict[str, float]:
 def survey(cfg: dict[str, Any], out_dir: Path, log: RunLog) -> list[dict[str, Any]]:
     runs_root = Path(cfg["runs_dir"])
     local_ckpt_dir = Path(cfg["local_checkpoints_dir"])
+    eval_cfg = cfg["eval"]
 
     # Collect all .pt paths
     candidates: list[Path] = []
@@ -46,6 +47,25 @@ def survey(cfg: dict[str, Any], out_dir: Path, log: RunLog) -> list[dict[str, An
     candidates = sorted(set(candidates))
     log.log("survey_start", n_checkpoints=len(candidates))
     print(f"\n[S0] Surveying {len(candidates)} checkpoints across all runs...")
+    print("[S0] Ranking with live surgery mini-eval on the materialized dataset, not stale training summaries.")
+
+    mat_dir = Path(eval_cfg["materialized_dir"]) if eval_cfg.get("materialized_dir") else None
+    loader = build_loader(
+        manifest=Path(cfg["manifest"]),
+        n_strips=eval_cfg["mini_strips"],
+        outer_width=eval_cfg["outer_width"],
+        inner_width=eval_cfg["inner_width"],
+        strip_height=eval_cfg["strip_height"],
+        boundary_band_px=eval_cfg["boundary_band_px"],
+        batch_size=eval_cfg["batch_size"],
+        seed=eval_cfg["seed"],
+        materialized_dir=mat_dir,
+        num_workers=int(eval_cfg.get("num_workers", 0)),
+        materialized_preload=bool(eval_cfg.get("materialized_preload", False)),
+    )
+    device = _pick_device()
+    preloaded = preload_batches(loader, device)
+    evaluator = ReusableModelEvaluator(preloaded, device, outer_width=eval_cfg["outer_width"])
 
     rows: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
@@ -66,17 +86,20 @@ def survey(cfg: dict[str, Any], out_dir: Path, log: RunLog) -> list[dict[str, An
         # Supplement with eval summary if available
         run_dir = pt_path.parent.parent
         eval_m = _parse_eval_summary(run_dir)
-        merged_m = {**eval_m, **m}  # checkpoint metrics override eval summary
+        merged_m = {**eval_m, **m}  # legacy reference metrics only
 
-        q = quality_score(merged_m)
+        live_metrics = evaluator.evaluate(ema_state, meta, fast=False)
+        q = quality_score(live_metrics)
+        summary_q = quality_score(merged_m) if merged_m else None
         row: dict[str, Any] = {
             "name": f"{run_dir.name}/{pt_path.name}" if run_dir.is_relative_to(runs_root) else pt_path.name,
             "path": str(pt_path),
             "run": run_dir.name,
             "epoch": meta.get("epoch"),
             "quality_score": q,
+            "summary_quality_score": summary_q,
         }
-        row.update({k: merged_m.get(k) for k in METRIC_COLS if k != "quality_score"})
+        row.update({k: live_metrics.get(k) for k in METRIC_COLS if k != "quality_score"})
         rows.append(row)
         del ema_state
         free_memory()
@@ -90,6 +113,9 @@ def survey(cfg: dict[str, Any], out_dir: Path, log: RunLog) -> list[dict[str, An
     save_json(rows, out_dir / "s0_survey.json")
     save_csv(rows, out_dir / "s0_survey.csv")
     (out_dir / "s0_survey.txt").write_text(table, encoding="utf-8")
+
+    evaluator.close()
+    free_memory()
 
     log.log("survey_done", n_valid=len(rows),
             best_path=rows[0]["path"] if rows else None,
