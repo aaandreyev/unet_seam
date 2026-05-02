@@ -108,7 +108,9 @@ def main() -> None:
             "canonical_shape_chw": [9, 1024, 256],
             "outer_width": int(dataset_cfg.get("outer_width", 128)),
             "inner_width_default": int(dataset_cfg.get("inner_width", 128)),
-            "supported_inner_widths": [128],
+            # Any inner_width works at inference (model uses dynamic bilinear upsampling).
+            # The model was trained with the default, so other values are OOD but functional.
+            "inner_width_train": int(dataset_cfg.get("inner_width", 128)),
             "seam_jitter_train_px": int(dataset_cfg.get("seam_jitter_px", 0)),
             "boundary_band_px": int(dataset_cfg.get("boundary_band_px", 24)),
         },
@@ -143,7 +145,13 @@ def main() -> None:
             "ema_decay": (train_cfg.get("ema") or {}).get("decay", 0.999),
             "exported_at": datetime.now(timezone.utc).isoformat(),
         },
-        "metrics": ((ckpt.get("metrics") or {}).get("val") or {}),
+        "metrics": {
+            "val": (ckpt.get("metrics") or {}).get("val") or {},
+            # Best-epoch values stored since stage9. Absent in older checkpoints.
+            "best_de": (ckpt.get("metrics") or {}).get("best_de"),
+            "best_mae": (ckpt.get("metrics") or {}).get("best_mae"),
+            "best_quality": (ckpt.get("metrics") or {}).get("best_quality"),
+        },
     }
     model_path.with_suffix(".json").write_text(json.dumps(sidecar, indent=2), encoding="utf-8")
     print(json.dumps({"model": str(model_path), "sidecar": str(model_path.with_suffix(".json"))}, ensure_ascii=False))

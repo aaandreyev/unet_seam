@@ -64,7 +64,10 @@ def reconstruct_corrected_strip(
     mix = mix.view(strip_rgb.shape[0], 3, 3, height, inner_width)
 
     gamma_map = torch.exp(gamma_limit * torch.tanh(gamma))
-    curved = inner.clamp(1e-4, 1.0).pow(gamma_map)
+    # Clamp to 1e-7 (not 1e-4) to minimize the brightness discontinuity at near-black
+    # pixels when gamma_map < 1 (lightening). 1e-4 caused a visible ~0.01 brightness
+    # jump for pure-black pixels; 1e-7 → jump ≈ 3e-4 (imperceptible, < 0.1/255).
+    curved = inner.clamp(1e-7, 1.0).pow(gamma_map)
     color_matrix = _identity_color_matrix(strip_rgb.shape[0], height, inner_width, strip_rgb.device, strip_rgb.dtype)
     color_matrix = color_matrix + mix_limit * torch.tanh(mix)
     mixed = apply_local_color_matrix(curved, color_matrix)
@@ -73,7 +76,22 @@ def reconstruct_corrected_strip(
     detail_map = detail_limit * torch.tanh(detail)
     proposed = mixed * gain_map + bias_map + detail_map
     confidence = torch.sigmoid(gate + gate_bias)
-    corrected_inner = inner + confidence * (proposed - inner)
+
+    # Attention spatial gate: attention_lowres is trained to be high near the seam
+    # and low elsewhere, providing spatial modulation of correction strength.
+    # Mapping: [0, 1] → [0, 2] clamped to [0, 1], so that the zero-initialised
+    # attention_head (sigmoid(0)=0.5 → gate=1.0) is backward-compatible with all
+    # existing checkpoints — they produce exactly the same output as before wiring.
+    # Trained checkpoints will gradually suppress far-from-seam corrections as
+    # attention_lowres learns to be ~0 far from the seam and ~1 near it.
+    attn_lowres = outputs.get("attention_lowres")
+    if attn_lowres is not None:
+        attn_full = F.interpolate(attn_lowres, size=(height, inner_width), mode="bilinear", align_corners=False)
+        spatial_gate = (attn_full * 2.0).clamp(0.0, 1.0)
+    else:
+        spatial_gate = torch.ones_like(confidence)
+
+    corrected_inner = inner + confidence * spatial_gate * (proposed - inner)
     corrected_inner = corrected_inner.clamp(0.0, 1.0)
     corrected_strip = torch.cat([outer, corrected_inner], dim=-1)
     return {

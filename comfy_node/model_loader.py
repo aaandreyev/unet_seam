@@ -9,8 +9,18 @@ from safetensors.torch import load_file
 from src.models.factory import build_model_from_config
 
 
-_MODEL_CACHE: dict[tuple[str, str], tuple[torch.nn.Module, dict]] = {}
+# Cache key: (path, device, mtime). mtime invalidates stale entries after export.
+_MODEL_CACHE: dict[tuple[str, str, float], tuple[torch.nn.Module, dict]] = {}
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def pick_inference_device() -> str:
+    """Select the best available device: CUDA > MPS > CPU."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 def _resolve_model_path(path: str) -> Path:
@@ -47,11 +57,12 @@ def _filter_matching_state_dict(
 
 
 def load_model(path: str, device: str = "cpu") -> tuple[torch.nn.Module, dict]:
-    key = (path, device)
+    model_path = _resolve_model_path(path)
+    mtime = model_path.stat().st_mtime if model_path.exists() else 0.0
+    key = (path, device, mtime)
     if key in _MODEL_CACHE:
         return _MODEL_CACHE[key]
-    model_path = _resolve_model_path(path)
-    if not model_path.exists():
+    if not model_path.exists():  # path resolved above, check again after mtime
         raise FileNotFoundError(
             f"Model file not found: {model_path}. "
             f"Expected export like '{_PROJECT_ROOT / 'outputs/exports/seam_harmonizer_v3.safetensors'}'."

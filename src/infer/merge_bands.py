@@ -60,10 +60,12 @@ def build_seam_local_weight_map(
     ih = float(max(1, min(int(inner_width), bh)))
     fw = float(max(1, min(int(blend_falloff_px or inner_width), bw)))
     fh = float(max(1, min(int(blend_falloff_px or inner_width), bh)))
-    # Corner taper distance: keep small so corners don't develop a visible "L-notch"
-    # where neither side owns the seam.  ~1/16 of inner_width, clamped to [4, 10].
-    cpx_h = float(max(4, min(10, int(inner_width) // 16)))
-    cpx_w = float(max(4, min(10, int(inner_width) // 16)))
+    # Corner taper distance: wide enough to avoid L-shaped artifacts at bbox corners
+    # where two perpendicular seam bands overlap.  1/8 of inner_width, clamped to [12, 32].
+    # Old value (inner_width//16, max 10px) was too tight — created visible angular seams
+    # at corners. 16px minimum for inner_width=128 gives ~12% of the correction band.
+    cpx_h = float(max(12, min(32, int(inner_width) // 8)))
+    cpx_w = float(max(12, min(32, int(inner_width) // 8)))
     if side == "left":
         d_px = (xx - float(x0)).clamp_min(0.0)
         # Always fade from seam to interior. blend_falloff_px controls how
@@ -126,10 +128,21 @@ def merge_side_deltas(
             weight = mask * support
         if side_confidences and side in side_confidences:
             confidence = side_confidences[side].to(device=mask.device, dtype=mask.dtype)
-            weight = weight * confidence
-        return delta * weight, {side: weight}
+            # Confidence attenuates the delta amplitude; spatial weight controls taper.
+            d_eff = delta * confidence
+        else:
+            d_eff = delta
+        return d_eff * weight, {side: weight}
 
+    # Multi-side: confidence is applied to each delta BEFORE spatial blending, and the
+    # spatial weights alone normalise the blend. This ensures confidence consistently
+    # attenuates correction amplitude whether one or many sides are active.
+    #
+    # Previous behaviour put confidence INTO the spatial weight, causing it to cancel
+    # out when all sides had equal confidence (e.g. two sides at conf=0.5 produced the
+    # same merged result as two sides at conf=1.0 — correction not attenuated at all).
     weights: dict[str, torch.Tensor] = {}
+    d_effs: dict[str, torch.Tensor] = {}
     for side, delta in side_deltas.items():
         support = (delta.abs().mean(dim=1, keepdim=True) > 1e-8).to(mask.dtype)
         if use_seam:
@@ -142,14 +155,16 @@ def merge_side_deltas(
             ) * support
         else:
             bmap = build_side_weight_map(mask, side) * support
+        weights[side] = bmap
         if side_confidences and side in side_confidences:
             confidence = side_confidences[side].to(device=mask.device, dtype=mask.dtype)
-            bmap = bmap * confidence
-        weights[side] = bmap
+            d_effs[side] = delta * confidence
+        else:
+            d_effs[side] = delta
 
     sides_order = list(side_deltas.keys())
     w_stack = torch.stack([weights[s] for s in sides_order], dim=0)
-    d_stack = torch.stack([side_deltas[s] for s in sides_order], dim=0)
+    d_stack = torch.stack([d_effs[s] for s in sides_order], dim=0)
     total_w = w_stack.sum(dim=0) + 1e-8
     merged0 = (w_stack * d_stack).sum(dim=0) / total_w
     return merged0 * mask, weights

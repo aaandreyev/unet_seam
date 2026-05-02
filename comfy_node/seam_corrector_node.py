@@ -9,10 +9,10 @@ import torch.nn.functional as F
 from PIL import Image
 
 try:
-    from .model_loader import load_model
+    from .model_loader import load_model, pick_inference_device
     from .strip_ops import mask_bbox
 except ImportError:
-    from model_loader import load_model
+    from model_loader import load_model, pick_inference_device
     from strip_ops import mask_bbox
 from src.infer.correct_full_frame import apply_corrector_to_full_frame
 
@@ -59,7 +59,7 @@ class SeamHarmonizerV3Node:
         process_bottom,
         debug_previews,
     ):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = pick_inference_device()
         model, _sidecar = load_model(model_path, device=device)
         image = IMAGE.permute(0, 3, 1, 2).contiguous()
         mask = MASK.unsqueeze(1).float()

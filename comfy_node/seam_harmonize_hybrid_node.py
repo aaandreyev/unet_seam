@@ -10,10 +10,10 @@ from PIL import Image
 from scipy.ndimage import distance_transform_edt, gaussian_filter
 
 try:
-    from .model_loader import load_model
+    from .model_loader import load_model, pick_inference_device
     from .strip_ops import mask_bbox, rectangularity
 except ImportError:
-    from model_loader import load_model
+    from model_loader import load_model, pick_inference_device
     from strip_ops import mask_bbox, rectangularity
 
 from src.infer.correct_full_frame import apply_corrector_to_full_frame
@@ -153,7 +153,7 @@ class SeamHarmonizerHybridNode:
         elif route_mode == "ml" and not ml_eligible:
             raise RuntimeError("ML route requires a near-rectangular mask, inside region, and at least one side with outer context.")
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = pick_inference_device()
         debug = {
             "route_mode": route_mode,
             "selected_route": selected_route,
@@ -181,7 +181,9 @@ class SeamHarmonizerHybridNode:
             )
             ml_rgb = self._apply_protect_mask(ml_rgb, rgb, PROTECT_MASK)
 
-        cv_input = IMAGE if alpha is None else IMAGE
+        # CV harmonizer operates on BHWC float [0,1]. Pass alpha-stripped image so the
+        # CV path doesn't see a 4-channel tensor — harmonize_by_mask_torch expects 3 channels.
+        cv_input = IMAGE[..., :3] if alpha is not None else IMAGE
         cv_result = None
         if selected_route in {"cv", "blend"}:
             cv_result = harmonize_by_mask_torch(
@@ -201,19 +203,19 @@ class SeamHarmonizerHybridNode:
             )
 
         if selected_route == "ml":
-            result = ml_rgb
-            if alpha is not None:
-                result = torch.cat((result, alpha), dim=1)
+            result_rgb = ml_rgb
         elif selected_route == "cv":
-            result = cv_result.permute(0, 3, 1, 2).contiguous()
+            # cv_result is BHWC with 3 channels (cv_input was already stripped of alpha)
+            result_rgb = cv_result.permute(0, 3, 1, 2).contiguous()
         else:
             cv_rgb = cv_result[..., :3].permute(0, 3, 1, 2).contiguous()
-            blended_rgb = self._blend_ml_cv(rgb, ml_rgb, cv_rgb, mask, region)
-            blended_rgb = self._apply_protect_mask(blended_rgb, rgb, PROTECT_MASK)
-            if alpha is not None:
-                result = torch.cat((blended_rgb, alpha), dim=1)
-            else:
-                result = blended_rgb
+            result_rgb = self._blend_ml_cv(rgb, ml_rgb, cv_rgb, mask, region)
+            result_rgb = self._apply_protect_mask(result_rgb, rgb, PROTECT_MASK)
+
+        if alpha is not None:
+            result = torch.cat((result_rgb, alpha), dim=1)
+        else:
+            result = result_rgb
 
         debug["ml_debug"] = ml_debug["per_side"] if ml_debug else None
         if debug_previews:

@@ -80,6 +80,21 @@ def _replicate_pad_strip(strip: torch.Tensor, target_width: int) -> tuple[torch.
     return padded, edge_padded
 
 
+def _replicate_pad_height(strip: torch.Tensor, target_height: int) -> torch.Tensor:
+    """Pad the height dimension (dim -2) with replicate padding to reach target_height.
+
+    This ensures all canonicalized strips have the same height so they can be
+    batched via torch.stack in the inference pipeline. Required when image height
+    or width is smaller than strip_height (default 1024): e.g., a 768-tall image
+    produces left/right strips of height 768 while top/bottom strips (after rot90)
+    may have height 1024, causing torch.stack to fail.
+    """
+    pad_h = max(target_height - strip.shape[-2], 0)
+    if pad_h == 0:
+        return strip
+    return F.pad(strip, (0, 0, 0, pad_h), mode="replicate")
+
+
 def _strip_origin_along_axis(bbox_start: int, image_extent: int, strip_len: int) -> int:
     """
     Place a length-``strip_len`` window so it covers the bbox from the top/left first.
@@ -110,12 +125,14 @@ def extract_side_strip(
         inner = image[:, y_start : y_start + spec.strip_height, x0 : min(w, x0 + spec.inner_width)]
         strip = torch.cat([outer, inner], dim=-1)
         strip, edge_padded = _replicate_pad_strip(strip, spec.width)
+        strip = _replicate_pad_height(strip, spec.strip_height)
     elif side == "right":
         y_start = _strip_origin_along_axis(y0, h, spec.strip_height)
         inner = image[:, y_start : y_start + spec.strip_height, max(0, x1 - spec.inner_width) : x1]
         outer = image[:, y_start : y_start + spec.strip_height, x1 : min(w, x1 + spec.outer_width)]
         strip = torch.cat([inner, outer], dim=-1)
         strip, edge_padded = _replicate_pad_strip(strip, spec.width)
+        strip = _replicate_pad_height(strip, spec.strip_height)
         strip = canonicalize_strip(strip, "right")
     elif side == "top":
         x_start = _strip_origin_along_axis(x0, w, spec.strip_height)
@@ -125,6 +142,7 @@ def extract_side_strip(
         strip = F.pad(strip, (0, 0, 0, max(spec.width - strip.shape[-2], 0)), mode="replicate")
         edge_padded = max(spec.width - strip.shape[-2], 0)
         strip = canonicalize_strip(strip, "top")
+        strip = _replicate_pad_height(strip, spec.strip_height)
     elif side == "bottom":
         x_start = _strip_origin_along_axis(x0, w, spec.strip_height)
         inner = image[:, max(0, y1 - spec.inner_width) : y1, x_start : x_start + spec.strip_height]
@@ -133,6 +151,7 @@ def extract_side_strip(
         strip = F.pad(strip, (0, 0, 0, max(spec.width - strip.shape[-2], 0)), mode="replicate")
         edge_padded = max(spec.width - strip.shape[-2], 0)
         strip = canonicalize_strip(strip, "bottom")
+        strip = _replicate_pad_height(strip, spec.strip_height)
     else:
         raise ValueError(f"unsupported side: {side}")
     meta = {"edge_padded_pixels": int(edge_padded)}

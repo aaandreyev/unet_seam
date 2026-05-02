@@ -48,7 +48,16 @@ def test_corner_fusion_does_not_amplify_delta():
     assert float(merged.abs().max()) <= 0.2 + 1e-6
 
 
-def test_confidence_weighting_prefers_higher_confidence_side():
+def test_confidence_weighting_scales_merged_result():
+    """Confidence attenuates effective delta: result lies between conf-scaled contributions.
+
+    New behaviour (stage9 fix): confidence is applied to the delta BEFORE spatial blending,
+    not to the spatial weight. This makes single-side and multi-side consistent — half
+    confidence produces half correction in both cases.
+
+    For left (delta=0.2, conf=0.9) and top (delta=0.1, conf=0.1) with equal spatial weights:
+    eff_left=0.18, eff_top=0.01 → merged ≈ (0.18+0.01)/2 = 0.095 (between the two).
+    """
     mask = torch.ones(1, 1, 8, 8)
     side_deltas = {
         "left": torch.full((1, 3, 8, 8), 0.2),
@@ -59,11 +68,21 @@ def test_confidence_weighting_prefers_higher_confidence_side():
         "top": torch.full((1, 1, 8, 8), 0.1),
     }
     merged, weights = merge_side_deltas(side_deltas, mask, side_confidences=side_confidences)
-    assert float(weights["left"][..., 0, 0]) > float(weights["top"][..., 0, 0])
-    assert float(merged[..., 0, 0].mean()) > 0.15
+    # Spatial weights are now equal (pure spatial, no confidence) for a simple uniform mask.
+    assert float(weights["left"][..., 0, 0]) == pytest.approx(float(weights["top"][..., 0, 0]), abs=1e-5)
+    # Merged result is between the effective deltas (conf_top*d_top=0.01, conf_left*d_left=0.18)
+    merged_val = float(merged[..., 0, 0].mean())
+    assert merged_val > 0.01, "Merged must be above low-confidence side contribution"
+    assert merged_val < 0.18, "Merged must be below high-confidence-side contribution (spatial avg)"
 
 
-def test_zero_confidence_removes_side_weight_entirely():
+def test_zero_confidence_zeroes_effective_delta_not_spatial_weight():
+    """Zero confidence zeroes the side's effective delta; spatial weight still exists.
+
+    The returned weights dict contains SPATIAL weights (pure geometry, no confidence).
+    A zero-confidence side still has a non-zero spatial weight map — it just contributes
+    a zero effective delta, so it has no effect on the merged result.
+    """
     mask = torch.ones(1, 1, 8, 8)
     side_deltas = {
         "left": torch.full((1, 3, 8, 8), 0.2),
@@ -74,7 +93,9 @@ def test_zero_confidence_removes_side_weight_entirely():
         "top": torch.ones(1, 1, 8, 8),
     }
     merged, weights = merge_side_deltas(side_deltas, mask, side_confidences=side_confidences)
-    assert float(weights["left"].max()) == 0.0
+    # Spatial weight for the zero-confidence side still exists (pure geometry)
+    assert float(weights["left"].max()) > 0, "Spatial weight is independent of confidence"
+    # Zero-confidence left side has zero effective delta → result driven by top alone
     assert float(merged[..., 0, 0].mean()) < 0.12
 
 
