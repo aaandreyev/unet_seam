@@ -6,7 +6,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from model_surgery.lib.eval_mini import (
-    ReusableModelEvaluator, _infer_architecture_from_state_dict, _normalize_legacy_state_dict, build_model,
+    ReusableModelEvaluator, _infer_architecture_from_state_dict, _normalize_legacy_state_dict, _unexpected_keys_to_raise, build_model,
     cache_coarse_outputs, eval_from_cache, eval_with_preloaded_fast,
     metrics_summary, quality_score, run_eval,
 )
@@ -201,6 +201,16 @@ def test_normalize_legacy_state_dict_squeezes_layernorm_like_params(tiny_state):
     legacy[key] = tiny_state[key].view(1, -1, 1, 1)
     normalized = _normalize_legacy_state_dict(legacy)
     assert normalized[key].shape == tiny_state[key].shape
+
+
+def test_unexpected_keys_filter_ignores_legacy_aux_heads():
+    keys = [
+        "curve_head.0.weight",
+        "shading_head.2.bias",
+        "totally_unknown.weight",
+    ]
+    unexpected = _unexpected_keys_to_raise(keys)
+    assert unexpected == ["totally_unknown.weight"]
 
 
 # --- cache_coarse_outputs + eval_from_cache ---

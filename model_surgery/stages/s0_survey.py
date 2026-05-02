@@ -88,7 +88,13 @@ def survey(cfg: dict[str, Any], out_dir: Path, log: RunLog) -> list[dict[str, An
         eval_m = _parse_eval_summary(run_dir)
         merged_m = {**eval_m, **m}  # legacy reference metrics only
 
-        live_metrics = evaluator.evaluate(ema_state, meta, fast=False)
+        try:
+            live_metrics = evaluator.evaluate(ema_state, meta, fast=False)
+        except Exception as e:
+            log.log("survey_skip", path=str(pt_path), reason=f"live_eval_failed: {e}")
+            del ema_state
+            free_memory()
+            continue
         q = quality_score(live_metrics)
         summary_q = quality_score(merged_m) if merged_m else None
         row: dict[str, Any] = {

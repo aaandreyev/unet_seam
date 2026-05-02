@@ -21,6 +21,19 @@ from src.models.harmonizer import DEFAULT_CORRECTION_LIMITS, SeamHarmonizerV3
 from model_surgery.lib.checkpoint_io import free_memory
 
 
+_IGNORABLE_UNEXPECTED_KEY_PREFIXES = (
+    "curve_head.",
+    "shading_head.",
+)
+
+
+def _unexpected_keys_to_raise(unexpected_keys: list[str]) -> list[str]:
+    return [
+        key for key in unexpected_keys
+        if not key.startswith(_IGNORABLE_UNEXPECTED_KEY_PREFIXES)
+    ]
+
+
 def _pick_device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -144,8 +157,9 @@ def build_model(state_dict: dict[str, torch.Tensor], meta: dict[str, Any],
         model = _make(inf_ch, inf_bl)
         result = model.load_state_dict(state_dict, strict=False)
 
-    if result.unexpected_keys:
-        raise RuntimeError(f"Unexpected keys in state_dict: {result.unexpected_keys[:5]}")
+    unexpected = _unexpected_keys_to_raise(result.unexpected_keys)
+    if unexpected:
+        raise RuntimeError(f"Unexpected keys in state_dict: {unexpected[:5]}")
     if device.type == "cuda":
         model = model.to(memory_format=torch.channels_last)
     model.eval()
@@ -464,8 +478,9 @@ class ReusableModelEvaluator:
             if correction_limits is not None:
                 model.correction_limits.update({k: float(v) for k, v in correction_limits.items()})
         result = model.load_state_dict(state_dict, strict=False)
-        if result.unexpected_keys:
-            raise RuntimeError(f"Unexpected keys in state_dict: {result.unexpected_keys[:5]}")
+        unexpected = _unexpected_keys_to_raise(result.unexpected_keys)
+        if unexpected:
+            raise RuntimeError(f"Unexpected keys in state_dict: {unexpected[:5]}")
         model.eval()
         return model
 
