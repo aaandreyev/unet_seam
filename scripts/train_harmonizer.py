@@ -320,6 +320,8 @@ def main() -> None:
             print(json.dumps({"event": "torch_compile", "status": "skipped", "reason": str(exc)}, ensure_ascii=False), flush=True)
     start_epoch = 0
     best_quality = float("inf")
+    best_de = float("inf")
+    best_mae = float("inf")
     if args.resume:
         state = load_checkpoint(Path(args.resume), map_location=device.type)
         _raw_model(model).load_state_dict(state["model"])
@@ -331,7 +333,10 @@ def main() -> None:
             scaler.load_state_dict(state["scaler"])
         restore_rng_state(state.get("rng_state", {}))
         start_epoch = int(state["epoch"]) + 1
-        best_quality = _quality(((state.get("metrics") or {}).get("val") or {}))
+        _prev_val = (state.get("metrics") or {}).get("val") or {}
+        best_quality = _quality(_prev_val)
+        best_de = float(_prev_val.get("boundary_ciede2000_16", float("inf")))
+        best_mae = float(_prev_val.get("boundary_mae_16", float("inf")))
         if args.additional_epochs is not None:
             total_epochs = start_epoch + int(args.additional_epochs)
         print(json.dumps({"event": "resumed", "start_epoch": start_epoch}, ensure_ascii=False), flush=True)
@@ -454,6 +459,14 @@ def main() -> None:
         if quality < best_quality:
             best_quality = quality
             save_training_checkpoint(Path("outputs/checkpoints/best_harmonizer_quality.pt"), model=model, ema_state=ema.state_dict(), optimizer=optimizer, scheduler=scheduler, scaler=scaler, epoch=epoch, config=cfg, metrics=metrics)
+        current_de = float(val_result.metrics.get("boundary_ciede2000_16", float("inf")))
+        if current_de < best_de:
+            best_de = current_de
+            save_training_checkpoint(Path("outputs/checkpoints/best_harmonizer_de.pt"), model=model, ema_state=ema.state_dict(), optimizer=optimizer, scheduler=scheduler, scaler=scaler, epoch=epoch, config=cfg, metrics=metrics)
+        current_mae = float(val_result.metrics.get("boundary_mae_16", float("inf")))
+        if current_mae < best_mae:
+            best_mae = current_mae
+            save_training_checkpoint(Path("outputs/checkpoints/best_harmonizer_mae.pt"), model=model, ema_state=ema.state_dict(), optimizer=optimizer, scheduler=scheduler, scaler=scaler, epoch=epoch, config=cfg, metrics=metrics)
         print(json.dumps({"event": "epoch_end", "epoch": epoch + 1, "train_loss": train_result.losses, "val_metrics": val_result.metrics}, ensure_ascii=False), flush=True)
     if tb_writer is not None:
         tb_writer.close()

@@ -114,6 +114,43 @@ def _integrated_score_0_95(r: dict[str, Any] | None) -> float | None:
     return max(0.0, min(95.0, round(score, 1)))
 
 
+def _detect_monotone_growth(
+    val_epochs: list[dict[str, Any]],
+    key: str,
+    *,
+    min_streak: int = 3,
+) -> dict[str, Any] | None:
+    """Return info about the longest monotonically-growing streak for `key`.
+
+    Returns None if no streak of length >= min_streak exists.
+    """
+    if len(val_epochs) < min_streak:
+        return None
+    vals: list[tuple[Any, float]] = [
+        (r.get("epoch_idx"), float(r[key]))
+        for r in val_epochs
+        if isinstance(r.get(key), (int, float)) and not math.isnan(float(r[key]))
+    ]
+    if len(vals) < min_streak:
+        return None
+    best: dict[str, Any] | None = None
+    streak_start = 0
+    for i in range(1, len(vals)):
+        if vals[i][1] <= vals[i - 1][1]:
+            streak_start = i
+        streak_len = i - streak_start + 1
+        if streak_len >= min_streak:
+            if best is None or streak_len > best["streak"]:
+                best = {
+                    "streak": streak_len,
+                    "start_ep": vals[streak_start][0],
+                    "end_ep": vals[i][0],
+                    "start_val": vals[streak_start][1],
+                    "end_val": vals[i][1],
+                }
+    return best
+
+
 def _collect_best_rows(val_epochs: list[dict[str, Any]]) -> dict[str, dict[str, Any] | None]:
     best_score: dict[str, Any] | None = None
     best_score_value: float | None = None
@@ -494,6 +531,25 @@ def build_html(
                 + ", ".join(risk_notes)
                 + ". Такие значения часто означают, что в full-frame inference шов ещё может читаться, даже если strip-метрики уже хорошие."
             )
+    gain_trend = _detect_monotone_growth(report.get("val_epochs") or [], "gain_abs_log_mean", min_streak=3)
+    if gain_trend is not None:
+        insights.append(
+            f"⚠ ВНИМАНИЕ: gain_abs_log_mean растёт {gain_trend['streak']} эпох подряд "
+            f"(ep {gain_trend['start_ep']}→{gain_trend['end_ep']}: "
+            f"{gain_trend['start_val']:.3f}→{gain_trend['end_val']:.3f}). "
+            "Модель увеличивает амплитуду gain-поправки вместо точной коррекции. "
+            "Необходимо: (1) уменьшить gain_limit до 1.20, (2) увеличить gain_reg вес, "
+            "(3) рассмотреть остановку — текущий чекпойнт может быть лучше финального."
+        )
+    conf_align_trend = _detect_monotone_growth(report.get("val_epochs") or [], "confidence_alignment_mae", min_streak=3)
+    if conf_align_trend is not None:
+        insights.append(
+            f"⚠ ВНИМАНИЕ: confidence_alignment_mae растёт {conf_align_trend['streak']} эпох подряд "
+            f"(ep {conf_align_trend['start_ep']}→{conf_align_trend['end_ep']}: "
+            f"{conf_align_trend['start_val']:.3f}→{conf_align_trend['end_val']:.3f}). "
+            "Attention head применяет поправки во всё менее правильных местах. "
+            "Рассмотрите снижение веса attn loss (текущий слишком высокий)."
+        )
 
     gap_rows = ""
     if best_score:

@@ -1,0 +1,62 @@
+seed: 44
+dataset:
+  source_manifest: manifests/input_raw_manifest.jsonl
+  strips_per_image: 60
+  strip_height: 1024
+  outer_width: 128
+  inner_width: 128
+  seam_jitter_px: 6
+  boundary_band_px: 24
+model:
+  architecture: seam_harmonizer_v3
+  in_channels: 9
+  channels: [32, 64, 128, 192]
+  blocks: [2, 2, 4, 6]
+  correction_limits:
+    gain_limit: 1.20      # was 1.80 in v1 — exp(1.80)≈6× overcorrection risk; 1.20 → exp(1.20)≈3.3×
+    gamma_limit: 1.20     # was 1.80; matched to gain_limit
+    bias_limit: 0.50
+    mix_limit: 0.90
+    detail_limit: 0.35
+    gate_bias: -0.15      # slightly tighter than v1 (-0.10) to reduce baseline confidence
+loss:
+  low_sigma: 5.0
+  weights:
+    rec: 0.8
+    seam: 2.0             # was 1.3 — primary objective must dominate
+    low: 1.5              # was 1.2 — lowfreq_mae close to target, push it over
+    grad: 0.30
+    chroma: 1.0           # was 0.7 — delta_chroma_profile is 4× over safe
+    stats: 0.35
+    lab: 1.2              # was 0.8 — ΔE@16 gap to 2.25 requires stronger LAB supervision
+    gate: 0.15            # was 0.03 — confidence outside seam is too high; needs real weight
+    profile: 0.80         # was 0.55 — delta_luma/chroma profile stuck at 3-4× target
+    attn: 0.08            # was 0.20 — secondary task, was dominating at 19% of weighted loss
+    overcorr: 0.60        # was 0.22 — overcorr_mae is 4.5× safe threshold
+    gain_reg: 0.80        # was 0.20 — gain_abs_log_mean grew ×3 across 10 epochs
+    field: 0.15
+    detail: 0.08
+    matrix: 0.10
+train:
+  seed: 44
+  lr: 8.0e-6              # was 3e-5 — at plateau, smaller step to avoid oscillating
+  encoder_lr_scale: 0.1   # encoder is well-trained; near-freeze to protect features
+  freeze_correction_epochs: 2  # phase A: attention+encoder settle before correction heads
+  weight_decay: 2.0e-4
+  betas: [0.9, 0.99]
+  precision: bf16
+  batch_size: 16
+  val_batch_size: 16
+  num_epochs: 8
+  num_workers: 4
+  compile: false
+scheduler:
+  warmup_steps: 200
+  min_lr_scale: 0.05      # was 0.2 — deeper cosine descent to escape plateau
+ema:
+  decay: 0.999
+logging:
+  tensorboard: true
+  log_dir: outputs/logs/tensorboard_harmonizer_stage9
+  log_interval: 20
+  console_log_interval: 25

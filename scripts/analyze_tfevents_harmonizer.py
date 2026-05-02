@@ -36,7 +36,7 @@ _DEFAULT_LOSS_WEIGHTS: dict[str, float] = {
     "field": 0.10,
     "detail": 0.08,
     "matrix": 0.10,
-    "gain_reg": 1.0e-8,
+    "gain_reg": 0.20,
 }
 
 
