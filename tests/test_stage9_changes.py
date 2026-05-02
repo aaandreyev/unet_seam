@@ -72,12 +72,19 @@ def test_stage9_loss_weights_rebalanced():
     assert w["seam"] > w["attn"] * 5, (
         f"seam weight ({w['seam']}) should be >> attn ({w['attn']})"
     )
-    # gain_reg must be substantially higher than old default (0.20 → now ≥ 0.50)
-    assert w["gain_reg"] >= 0.50, f"gain_reg must be ≥ 0.50; got {w['gain_reg']}"
+    # gain_reg must be higher than old 0.20 but not catastrophically high.
+    # At 0.80 it becomes 75% of total loss (raw gain_reg ≈ 0.357 from tfevents).
+    # At 0.40 it becomes ~55%, still dominant but allows seam correction to compete.
+    assert 0.30 <= w["gain_reg"] <= 0.60, (
+        f"gain_reg must be in [0.30, 0.60] — too low doesn't fix growth, "
+        f"too high (≥0.60) dominates loss and kills seam correction; got {w['gain_reg']}"
+    )
     # overcorrection must be substantially higher than old 0.22
     assert w["overcorr"] >= 0.50, f"overcorr weight must be ≥ 0.50; got {w['overcorr']}"
-    # attn must be reduced from 0.20
-    assert w["attn"] <= 0.10, f"attn weight must be ≤ 0.10; got {w['attn']}"
+    # attn must be reduced from 0.20 but kept meaningful for phase-A freeze
+    assert 0.10 <= w["attn"] <= 0.18, (
+        f"attn weight must be in [0.10, 0.18] — too low weakens phase-A training; got {w['attn']}"
+    )
 
 
 def test_stage9_lr_is_lower_than_v1():
@@ -138,12 +145,24 @@ def test_train_harmonizer_restores_de_and_mae_on_resume():
 
 def test_notebook_primary_checkpoint_is_best_de():
     nb = Path("colab/seam_harmonizer_train_eval_colab.ipynb").read_text(encoding="utf-8")
-    assert "best_harmonizer_de.pt" in nb, (
+    assert "PRIMARY_CHECKPOINT = 'best_harmonizer_de.pt'" in nb, (
         "Notebook PRIMARY_CHECKPOINT should be best_harmonizer_de.pt (lowest ΔE@16)"
     )
-    # Must not still default to quality (was wrong default)
+    # Must not still default to quality for PRIMARY_CHECKPOINT
     assert "PRIMARY_CHECKPOINT = 'best_harmonizer_quality.pt'" not in nb, (
         "Notebook must no longer default PRIMARY_CHECKPOINT to best_harmonizer_quality.pt"
+    )
+
+
+def test_notebook_load_weights_checkpoint_is_quality_for_old_runs():
+    """LOAD_WEIGHTS_CHECKPOINT must be best_harmonizer_quality.pt.
+
+    Old runs (pre-stage9) only produced best_harmonizer_quality.pt.
+    Using best_harmonizer_de.pt here would FileNotFoundError on the first stage9 run.
+    """
+    nb = Path("colab/seam_harmonizer_train_eval_colab.ipynb").read_text(encoding="utf-8")
+    assert "LOAD_WEIGHTS_CHECKPOINT = 'best_harmonizer_quality.pt'" in nb, (
+        "LOAD_WEIGHTS_CHECKPOINT must be best_harmonizer_quality.pt for loading from pre-stage9 runs"
     )
 
 
@@ -301,3 +320,130 @@ def test_collect_best_rows_still_works_after_refactor():
     best = mod._collect_best_rows(rows)
     assert best["mae"]["epoch_idx"] == 2
     assert best["de"]["epoch_idx"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Additional fixes: _quality, best tracking, metrics, scheduler, freeze_phase
+# ---------------------------------------------------------------------------
+
+def test_quality_function_excludes_conf_align():
+    """_quality must not use confidence_alignment_mae (metric measures wrong output)."""
+    src = Path("scripts/train_harmonizer.py").read_text(encoding="utf-8")
+    # The function body after the docstring should not use conf_align
+    # Find _quality function body
+    start = src.index("def _quality(")
+    end = src.index("\ndef ", start + 1)
+    fn_body = src[start:end]
+    assert "conf_align" not in fn_body, (
+        "_quality() must not use confidence_alignment_mae — the metric tracks gate vs fixed-0.08 "
+        "target, while attn loss trains attention_lowres vs percentile-normalized target. "
+        "The metric grows monotonically regardless of seam quality improvement."
+    )
+
+
+def test_train_harmonizer_stores_best_values_in_checkpoint_metrics():
+    """last_harmonizer.pt must include best_de/best_mae/best_quality in metrics dict."""
+    src = Path("scripts/train_harmonizer.py").read_text(encoding="utf-8")
+    assert '"best_quality": best_quality' in src or "'best_quality': best_quality" in src, (
+        "metrics dict saved to last_harmonizer.pt must include best_quality for correct resume"
+    )
+    assert '"best_de": best_de' in src or "'best_de': best_de" in src, (
+        "metrics dict saved to last_harmonizer.pt must include best_de for correct resume"
+    )
+    assert '"best_mae": best_mae' in src or "'best_mae': best_mae" in src, (
+        "metrics dict saved to last_harmonizer.pt must include best_mae for correct resume"
+    )
+
+
+def test_train_harmonizer_restores_best_from_stored_keys_on_resume():
+    """On resume, best_de/best_mae should prefer stored keys over last-epoch metrics."""
+    src = Path("scripts/train_harmonizer.py").read_text(encoding="utf-8")
+    assert '_stored.get("best_de")' in src or "_stored.get('best_de')" in src, (
+        "best_de must be restored from stored checkpoint key, not just last-epoch val metrics"
+    )
+    assert '_stored.get("best_mae")' in src or "_stored.get('best_mae')" in src, (
+        "best_mae must be restored from stored checkpoint key, not just last-epoch val metrics"
+    )
+
+
+def test_train_harmonizer_freeze_phase_floor_is_zero():
+    """freeze_phase_floor must be 0 (epoch-0-relative) not start_epoch.
+
+    Using start_epoch triggers re-freeze of correction heads on every resume,
+    wasting 2 epochs of training budget that was intended for the initial run only.
+    """
+    src = Path("scripts/train_harmonizer.py").read_text(encoding="utf-8")
+    assert "freeze_phase_floor = 0" in src, (
+        "freeze_phase_floor must be 0 (absolute), not start_epoch. "
+        "With start_epoch, any resume would re-freeze correction heads for 2 epochs."
+    )
+    assert "freeze_phase_floor = start_epoch" not in src, (
+        "freeze_phase_floor = start_epoch is wrong: causes re-freeze on every resume"
+    )
+
+
+def test_train_harmonizer_scheduler_not_loaded_with_additional_epochs():
+    """Scheduler state must not be loaded when --additional-epochs is specified.
+
+    With additional_epochs, total_steps doubles. Loading the old state would place
+    LR at mid-schedule (~52% of peak) instead of near-zero end-of-schedule — a ×10 LR jump.
+    """
+    src = Path("scripts/train_harmonizer.py").read_text(encoding="utf-8")
+    assert "additional_epochs is None" in src, (
+        "Scheduler state must only be restored when additional_epochs is None. "
+        "When additional_epochs is set, total_steps changes and the old schedule state "
+        "would cause a large LR jump (×10) at the resume point."
+    )
+
+
+def test_overcorrection_metric_uses_abs_before_blur():
+    """overcorrection_mae must compute abs-then-blur to match the loss computation.
+
+    Old code used blur-then-abs (sigma=7.0) which allows sign cancellation across channels
+    and uses a different sigma than the loss (5.0). This misalignment means tuning the
+    overcorr loss weight does not reliably improve the reported metric.
+    """
+    src = Path("src/metrics/harmonizer_metrics.py").read_text(encoding="utf-8")
+    # The new code should have abs() BEFORE gaussian_blur_tensor for overcorrection
+    assert "gaussian_blur_tensor(delta_pred.abs()" in src, (
+        "overcorrection_mae must use abs-then-blur (matching the loss), not blur-then-abs"
+    )
+    assert "overcorr_pred_mag" in src, (
+        "overcorrection_mae computation must use a separate abs-then-blur variable"
+    )
+
+
+def test_attention_alignment_mae_metric_added():
+    """attention_alignment_mae must be computed against attention_lowres (the actual supervised output)."""
+    src = Path("src/metrics/harmonizer_metrics.py").read_text(encoding="utf-8")
+    assert "attention_alignment_mae" in src, (
+        "attention_alignment_mae must be added to track the attention head quality "
+        "using the same normalization as the attn loss (85th percentile)"
+    )
+    assert "attention_lowres" in src, (
+        "attention_alignment_mae must compare attention_lowres, not confidence (gate)"
+    )
+
+
+def test_write_colab_runtime_yamls_default_checkpoint_is_best_de():
+    src = Path("scripts/write_colab_runtime_yamls.py").read_text(encoding="utf-8")
+    assert "best_harmonizer_de.pt" in src, (
+        "write_colab_runtime_yamls.py --primary-checkpoint default must be best_harmonizer_de.pt"
+    )
+
+
+def test_stage9_no_dead_train_seed_key():
+    cfg = yaml.safe_load(STAGE9_CFG.read_text(encoding="utf-8"))
+    train_section = cfg.get("train", {})
+    assert "seed" not in train_section, (
+        "train.seed is dead config — train_harmonizer.py reads cfg.get('seed') (top-level), "
+        "not train.seed. Remove to avoid confusion."
+    )
+
+
+def test_metrics_imports_F():
+    """harmonizer_metrics.py must import torch.nn.functional for attention_alignment_mae."""
+    src = Path("src/metrics/harmonizer_metrics.py").read_text(encoding="utf-8")
+    assert "import torch.nn.functional as F" in src, (
+        "harmonizer_metrics.py must import F for F.interpolate used in attention_alignment_mae"
+    )

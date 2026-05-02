@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from src.metrics.deltae import boundary_ciede2000
 from src.models.blocks import gaussian_blur_tensor
@@ -57,8 +58,13 @@ def _harmonizer_metrics_torch(
     low_target = gaussian_blur_tensor(target_inner, 5.0)
     delta_pred = pred_inner - input_inner
     delta_target = target_inner - input_inner
+    # Signed blur for profile metrics (captures low-frequency drift direction).
     low_delta_pred = gaussian_blur_tensor(delta_pred, 7.0)
     low_delta_target = gaussian_blur_tensor(delta_target, 7.0)
+    # abs-then-blur for overcorrection (matches loss computation; no sign cancellation across channels).
+    # Uses sigma=5.0 to match HarmonizerLossComputer.low_sigma default.
+    overcorr_pred_mag = gaussian_blur_tensor(delta_pred.abs(), 5.0).mean(dim=1, keepdim=True)
+    overcorr_target_mag = gaussian_blur_tensor(delta_target.abs(), 5.0).mean(dim=1, keepdim=True)
     confidence, detail, gain = _extract_aux(outputs_or_curves, shading)
     out = {
         "boundary_mae_8": _mae_band_mean(pred_inner, target_inner, 8),
@@ -69,16 +75,33 @@ def _harmonizer_metrics_torch(
         "gradient_mae": _grad_mae_mean(pred_inner, target_inner),
         "delta_luma_profile_mae": _row_profile_mae(_luma(low_delta_pred), _luma(low_delta_target)),
         "delta_chroma_profile_mae": _row_profile_mae(low_delta_pred[:, 0:1] - low_delta_pred[:, 1:2], low_delta_target[:, 0:1] - low_delta_target[:, 1:2]),
-        "overcorrection_mae": (low_delta_pred.abs() - low_delta_target.abs()).clamp_min(0.0).mean().item(),
+        "overcorrection_mae": (overcorr_pred_mag - overcorr_target_mag).clamp_min(0.0).mean().item(),
     }
     if confidence is not None:
         out["confidence_mean"] = confidence.mean().item()
+        # NOTE: confidence_alignment_mae compares the gate (amplitude head) against a fixed-0.08
+        # normalization. The attn loss trains attention_lowres (separate head) against 85th-percentile
+        # normalization. These are unrelated: this metric grows monotonically as the gate becomes more
+        # spatially modulated. It is kept for backward-compat with dashboards but should not be used
+        # for checkpoint selection or as a progress indicator.
         target_conf = ((target_inner - input_inner).abs().mean(dim=1, keepdim=True) / 0.08).clamp(0.0, 1.0)
         out["confidence_alignment_mae"] = (confidence - target_conf).abs().mean().item()
     if detail is not None:
         out["detail_abs_mean"] = detail.abs().mean().item()
     if gain is not None:
         out["gain_abs_log_mean"] = gain.clamp_min(1e-6).log().abs().mean().item()
+    # Attention alignment: compares attention_lowres against the same percentile-normalized target
+    # used by the attn loss — the only reliable "where-to-act" quality signal.
+    if isinstance(outputs_or_curves, dict):
+        attn_lowres = outputs_or_curves.get("attention_lowres")
+        if attn_lowres is not None:
+            attn_full = F.interpolate(attn_lowres, size=pred_inner.shape[-2:], mode="bilinear", align_corners=False)
+            delta_abs = gaussian_blur_tensor((target_inner - input_inner).abs(), 5.0).mean(dim=1, keepdim=True)
+            delta_abs_f = delta_abs.float() if delta_abs.dtype not in (torch.float32, torch.float64) else delta_abs
+            norm = torch.quantile(delta_abs_f.flatten(start_dim=1), 0.85, dim=1).view(-1, 1, 1, 1).clamp_min(0.03)
+            norm = norm.to(device=delta_abs.device, dtype=delta_abs.dtype)
+            target_attn = (delta_abs / norm).clamp(0.0, 1.0)
+            out["attention_alignment_mae"] = (attn_full - target_attn).abs().mean().item()
     return out
 
 

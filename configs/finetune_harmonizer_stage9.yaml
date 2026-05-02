@@ -31,14 +31,14 @@ loss:
     lab: 1.2              # was 0.8 — ΔE@16 gap to 2.25 requires stronger LAB supervision
     gate: 0.15            # was 0.03 — confidence outside seam is too high; needs real weight
     profile: 0.80         # was 0.55 — delta_luma/chroma profile stuck at 3-4× target
-    attn: 0.08            # was 0.20 — secondary task, was dominating at 19% of weighted loss
+    attn: 0.15            # was 0.20 — reduce but keep meaningful for phase-A (freeze_correction_epochs=2)
     overcorr: 0.60        # was 0.22 — overcorr_mae is 4.5× safe threshold
-    gain_reg: 0.80        # was 0.20 — gain_abs_log_mean grew ×3 across 10 epochs
+    gain_reg: 0.40        # was 0.20 — gain growing ×3; 0.40 is ~2× increase, not 4×.
+                          # 0.80 would be 75% of total loss and destroy seam correction ability.
     field: 0.15
     detail: 0.08
     matrix: 0.10
 train:
-  seed: 44
   lr: 8.0e-6              # was 3e-5 — at plateau, smaller step to avoid oscillating
   encoder_lr_scale: 0.1   # encoder is well-trained; near-freeze to protect features
   freeze_correction_epochs: 2  # phase A: attention+encoder settle before correction heads

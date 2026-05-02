@@ -68,7 +68,6 @@ def _quality(metrics: dict[str, float]) -> float:
     delta_chroma_profile = metrics.get("delta_chroma_profile_mae", 1.0)
     overcorr = metrics.get("overcorrection_mae", 1.0)
     conf_mean = metrics.get("confidence_mean", 0.0)
-    conf_align = metrics.get("confidence_alignment_mae", 0.0)
     detail_abs = metrics.get("detail_abs_mean", 0.0)
     gain_abs = metrics.get("gain_abs_log_mean", 0.0)
     rel_de = max((1.0 - de / max(base, 1e-6)) * 100.0, 0.0)
@@ -79,6 +78,11 @@ def _quality(metrics: dict[str, float]) -> float:
     detail_excess = max(detail_abs - 0.006, 0.0)
     gain_excess = max(gain_abs - 0.08, 0.0)
     undercorrection = max(15.0 - rel_mae, 0.0)
+    # NOTE: confidence_alignment_mae is intentionally excluded. It compares the gate
+    # (confidence head) against a fixed-0.08 normalization, while the attn loss trains
+    # attention_lowres against a percentile-normalized target. These are different outputs
+    # with different normalizations — the metric grows monotonically as training progresses
+    # even when seam quality improves, corrupting checkpoint selection.
     return (
         4.5 * de
         + 220.0 * mae
@@ -86,7 +90,6 @@ def _quality(metrics: dict[str, float]) -> float:
         + 95.0 * delta_luma_profile
         + 60.0 * delta_chroma_profile
         + 120.0 * overcorr
-        + 14.0 * conf_align
         + 25.0 * conf_excess
         + 60.0 * detail_excess
         + 20.0 * gain_excess
@@ -334,9 +337,14 @@ def main() -> None:
         restore_rng_state(state.get("rng_state", {}))
         start_epoch = int(state["epoch"]) + 1
         _prev_val = (state.get("metrics") or {}).get("val") or {}
-        best_quality = _quality(_prev_val)
-        best_de = float(_prev_val.get("boundary_ciede2000_16", float("inf")))
-        best_mae = float(_prev_val.get("boundary_mae_16", float("inf")))
+        _stored = state.get("metrics") or {}
+        # Prefer explicitly stored best values (written since stage9); fall back to last-epoch metrics.
+        # Without stored bests, resume from the last epoch's values — this is an under-estimate
+        # of the true best, meaning post-resume epochs might re-save a checkpoint that is actually
+        # worse than the historical best. Checkpoints produced before stage9 won't have these keys.
+        best_quality = float(_stored.get("best_quality") or _quality(_prev_val))
+        best_de = float(_stored.get("best_de") or _prev_val.get("boundary_ciede2000_16", float("inf")))
+        best_mae = float(_stored.get("best_mae") or _prev_val.get("boundary_mae_16", float("inf")))
         if args.additional_epochs is not None:
             total_epochs = start_epoch + int(args.additional_epochs)
         print(json.dumps({"event": "resumed", "start_epoch": start_epoch}, ensure_ascii=False), flush=True)
@@ -372,7 +380,10 @@ def main() -> None:
             min_lr_scale=float(cfg.get("scheduler", {}).get("min_lr_scale", 0.005)),
         )
         if args.resume:
-            if state.get("scheduler") is not None:
+            # Only restore scheduler state when NOT adding extra epochs. With --additional-epochs,
+            # total_steps doubled and the loaded last_epoch would place LR at mid-schedule (~52%),
+            # causing a ×10 LR jump. Instead let the schedule restart from the resume point.
+            if state.get("scheduler") is not None and args.additional_epochs is None:
                 scheduler.load_state_dict(state["scheduler"])
     loss_cfg = cfg.get("loss") or {}
     loss_computer = HarmonizerLossComputer(
@@ -402,7 +413,11 @@ def main() -> None:
         tb_writer = SummaryWriter(str(Path(log_cfg.get("log_dir", "outputs/logs/tensorboard_harmonizer"))))
     global_step = start_epoch * len(train_loader)
     freeze_correction_epochs = int(train_cfg.get("freeze_correction_epochs", 0))
-    freeze_phase_floor = start_epoch
+    # Always relative to epoch 0 so that resume (start_epoch > 0) does NOT re-trigger phase A.
+    # Example: 8-epoch run resumes at epoch 8 with freeze_correction_epochs=2.
+    # epoch 8 - 0 = 8 >= 2 → phase A is already done. Without this fix (floor=start_epoch),
+    # epochs 8 and 9 would be incorrectly frozen again.
+    freeze_phase_floor = 0
     for epoch in range(start_epoch, total_epochs):
         outer_width = int(cfg["dataset"].get("outer_width", 128))
         in_phase_a = (epoch - freeze_phase_floor) < freeze_correction_epochs
@@ -454,7 +469,13 @@ def main() -> None:
             for k, v in val_result.metrics.items():
                 tb_writer.add_scalar(f"val/metric/{k}", v, global_step)
             tb_writer.flush()
-        metrics = {"train": train_result.metrics, "val": val_result.metrics}
+        metrics = {
+            "train": train_result.metrics,
+            "val": val_result.metrics,
+            "best_quality": best_quality,
+            "best_de": best_de,
+            "best_mae": best_mae,
+        }
         save_training_checkpoint(Path("outputs/checkpoints/last_harmonizer.pt"), model=model, ema_state=ema.state_dict(), optimizer=optimizer, scheduler=scheduler, scaler=scaler, epoch=epoch, config=cfg, metrics=metrics)
         if quality < best_quality:
             best_quality = quality
