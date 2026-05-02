@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import pytest
 import torch
+from torch.utils.data import DataLoader
 
 from model_surgery.lib.eval_mini import (
     ReusableModelEvaluator, _infer_channels_blocks, build_model,
     cache_coarse_outputs, eval_from_cache, eval_with_preloaded_fast,
-    metrics_summary, quality_score,
+    metrics_summary, quality_score, run_eval,
 )
 from src.models.harmonizer import DEFAULT_CORRECTION_LIMITS, SeamHarmonizerV3
 
@@ -252,3 +253,34 @@ def test_cache_coarse_does_not_require_model_after(tiny_state, dummy_meta):
     limits = dict(DEFAULT_CORRECTION_LIMITS)
     metrics = eval_from_cache(cached, limits, outer_width=128)
     assert "boundary_mae_16" in metrics
+
+
+def test_run_eval_retries_with_smaller_batch_on_index_math_error(monkeypatch, tiny_state, dummy_meta):
+    loader = DataLoader(
+        [{"input": torch.zeros(1)} for _ in range(8)],
+        batch_size=8,
+        shuffle=False,
+        collate_fn=lambda batch: batch,
+        num_workers=0,
+    )
+
+    calls: list[int] = []
+
+    def fake_build_model(state_dict, meta, device):
+        return object()
+
+    def fake_eval_with_model(model, cur_loader, device, outer_width=128):
+        calls.append(int(cur_loader.batch_size))
+        if len(calls) == 1:
+            raise RuntimeError(
+                "Expected canUse32BitIndexMath(input) && canUse32BitIndexMath(output) to be true, but got false."
+            )
+        return {"boundary_mae_16": 0.01, "boundary_ciede2000_16": 2.0}
+
+    monkeypatch.setattr("model_surgery.lib.eval_mini.build_model", fake_build_model)
+    monkeypatch.setattr("model_surgery.lib.eval_mini.eval_with_model", fake_eval_with_model)
+    monkeypatch.setattr("model_surgery.lib.eval_mini.free_memory", lambda: None)
+
+    metrics = run_eval(tiny_state, dummy_meta, loader, device=torch.device("cpu"), outer_width=128)
+    assert metrics["boundary_mae_16"] == pytest.approx(0.01)
+    assert calls == [8, 4]

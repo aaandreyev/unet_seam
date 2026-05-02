@@ -319,6 +319,33 @@ def eval_with_model(
     return {k: v / steps for k, v in agg.items()} if steps > 0 else {}
 
 
+def _is_retryable_eval_error(exc: RuntimeError, device: torch.device) -> bool:
+    message = str(exc)
+    if "canUse32BitIndexMath" in message:
+        return True
+    if device.type == "cuda":
+        return "out of memory" in message.lower()
+    return False
+
+
+def _clone_loader_with_batch_size(loader: DataLoader, batch_size: int) -> DataLoader:
+    loader_kwargs = {
+        "dataset": loader.dataset,
+        "batch_size": batch_size,
+        "shuffle": False,
+        "num_workers": loader.num_workers,
+        "collate_fn": loader.collate_fn,
+        "pin_memory": loader.pin_memory,
+        "drop_last": loader.drop_last,
+    }
+    if loader.num_workers > 0:
+        loader_kwargs["persistent_workers"] = getattr(loader, "persistent_workers", False)
+        prefetch_factor = getattr(loader, "prefetch_factor", None)
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+    return DataLoader(**loader_kwargs)
+
+
 def eval_with_preloaded(
     model: SeamHarmonizerV3,
     batches: list[dict],
@@ -441,10 +468,25 @@ def run_eval(
     if device is None:
         device = _pick_device()
     model = build_model(state_dict, meta, device)
-    result = eval_with_model(model, loader, device, outer_width)
-    del model
-    free_memory()
-    return result
+    eval_loader = loader
+    try:
+        while True:
+            try:
+                return eval_with_model(model, eval_loader, device, outer_width)
+            except RuntimeError as exc:
+                current_bs = int(eval_loader.batch_size or 1)
+                if current_bs <= 1 or not _is_retryable_eval_error(exc, device):
+                    raise
+                next_bs = max(1, current_bs // 2)
+                print(
+                    f"[run_eval] Retryable eval failure at batch_size={current_bs} "
+                    f"({exc}). Retrying with batch_size={next_bs}..."
+                )
+                free_memory()
+                eval_loader = _clone_loader_with_batch_size(loader, next_bs)
+    finally:
+        del model
+        free_memory()
 
 
 def quality_score(metrics: dict[str, float]) -> float:
